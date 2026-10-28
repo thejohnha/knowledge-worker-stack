@@ -1,0 +1,42 @@
+# agent-browser.service: Google Chrome stable on display :99, run as user `browser` with its sandbox on.
+# A TEMPLATE: install it with `sed "s/@UID@/$(id -u browser)/g"` (README.md step 7), which fills in the
+# browser user's uid.
+# Applying a later change: `systemctl daemon-reload`; it takes effect at the next start. Restarting is safe
+# (session restore brings the tabs back) but drops whatever a page was in the middle of.
+[Unit]
+Description=Agent browser (Google Chrome stable) on :99 as user browser
+# Wants, not Requires, on openbox: a window-manager hiccup must not cancel the browser's start.
+After=openbox.service user@@UID@.service
+Wants=openbox.service user@@UID@.service
+[Service]
+User=browser
+RuntimeDirectory=agent-browser
+# Keeps the crash-repair counter across crash restarts, which is the whole point of it.
+RuntimeDirectoryPreserve=yes
+Environment=DISPLAY=:99
+Environment=HOME=/home/browser
+Environment=XDG_RUNTIME_DIR=/run/user/@UID@
+# Accessibility (reading Chrome's own pop-ups) needs a session bus. `loginctl enable-linger browser` creates
+# it at boot; Chrome never retries the bus, so a browser started before it exists stays blind.
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/@UID@/bus
+Environment=BROWSE_PREFS=/home/browser/browser-profiles/main/Default/Preferences
+Environment=BROWSE_CRASHFIX_STATE=/run/agent-browser/crashfix
+ExecStartPre=-/usr/bin/timeout 60 /bin/sh -c 'until [ -S /run/user/@UID@/bus ]; do sleep 1; done'
+# Turn accessibility ON before Chrome asks: with no dconf database the a11y bus starts with both FALSE.
+ExecStartPre=-/usr/bin/dbus-send --session --dest=org.a11y.Bus --type=method_call /org/a11y/bus org.freedesktop.DBus.Properties.Set string:org.a11y.Status string:IsEnabled variant:boolean:true
+ExecStartPre=-/usr/bin/dbus-send --session --dest=org.a11y.Bus --type=method_call /org/a11y/bus org.freedesktop.DBus.Properties.Set string:org.a11y.Status string:ScreenReaderEnabled variant:boolean:true
+# No `-`: a missing script stops the browser from starting. Script and unit move together.
+ExecStartPre=/home/browser/agent-browser/agent-browser-fix-session-restore.sh
+# No startup URLs, ever: with a restored session AND a URL list Chrome opens both, and tabs compound on every
+# restart. --password-store=basic keeps saved passwords readable with nobody logged in (no keyring here).
+# --force-renderer-accessibility=basic is what makes Chrome's pop-ups readable at all.
+ExecStart=/usr/bin/google-chrome-stable --remote-debugging-port=9222 --remote-debugging-address=127.0.0.1 --user-data-dir=/home/browser/browser-profiles/main --no-first-run --no-default-browser-check --disable-dev-shm-usage --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-session-crashed-bubble --restore-last-session --start-maximized --force-renderer-accessibility=basic --password-store=basic --disk-cache-size=268435456
+Restart=always
+# Memory ceiling: a runaway tab hits a wall instead of eating the machine. Size it to about 75% of RAM.
+# OOMPolicy=continue is load-bearing: the default (stop) plus Restart=always turns one dead tab into a full
+# browser restart. Never add MemoryHigh: it parks the browser in permanent reclaim, unable to answer.
+MemoryMax=6G
+MemorySwapMax=0
+OOMPolicy=continue
+[Install]
+WantedBy=multi-user.target

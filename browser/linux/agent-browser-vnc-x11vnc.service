@@ -1,0 +1,12 @@
+[Unit]
+Description=x11vnc sharing display :99
+After=xorg99.service
+Requires=xorg99.service
+[Service]
+# -localhost: reachable only through an ssh tunnel (x11vnc's traffic is not encrypted).
+# -repeat: without it x11vnc turns key auto-repeat off while a viewer is connected.
+# -noshm: Xorg runs with -extension MIT-SHM, and x11vnc exits at start without this flag.
+ExecStart=/usr/bin/x11vnc -display :99 -rfbport 5900 -rfbauth /etc/x11vnc.pass -forever -shared -repeat -noshm -localhost
+Restart=always
+[Install]
+WantedBy=multi-user.target

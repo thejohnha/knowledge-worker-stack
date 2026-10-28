@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# h — open herdr (all arguments pass through), then put the terminal back the way it was.
+# Detaching with ctrl+b q leaves mouse reporting, focus reporting, bracketed paste and the alternate
+# screen switched on, so the terminal prints escape codes on every keystroke until they are turned off.
+# herdr restores them on SIGHUP/SIGTERM but not on a prefix-q detach. Exit code is herdr's.
+herdr "$@"; rc=$?
+printf '\033[?1000l\033[?1002l\033[?1003l\033[?1004l\033[?1006l\033[?2004l\033[?1049l\033[?25h'
+stty sane 2>/dev/null
+exit $rc

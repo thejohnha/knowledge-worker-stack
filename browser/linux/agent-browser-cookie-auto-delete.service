@@ -1,0 +1,11 @@
+# agent-browser-cookie-auto-delete.service: one cookie auto-delete sweep, started by the matching .timer.
+# DRY RUN as shipped: it only logs what it WOULD delete. Add --arm to ExecStart once the log reads right
+# (README.md, "Cookie auto-delete"), then `systemctl daemon-reload`.
+[Unit]
+Description=browse cookie auto-delete sweep
+After=agent-browser.service
+[Service]
+Type=oneshot
+# Domains the sweep refuses to arm without, comma-separated. Uncomment and name your own.
+#Environment=BROWSE_PURGE_REQUIRE=example.com
+ExecStart=/usr/bin/node /root/agent-browser/browse-cookie-auto-delete.js --quiet

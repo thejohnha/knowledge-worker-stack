@@ -1,0 +1,7 @@
+{
+  "BrowserSignin": 0,
+  "SyncDisabled": true,
+  "MetricsReportingEnabled": false,
+  "AutofillAddressEnabled": false,
+  "AutofillCreditCardEnabled": true
+}

@@ -1,0 +1,1151 @@
+#!/usr/bin/env python3
+"""g -- everyday Gmail through Google's Workspace CLI (gws), for one account on this Mac.
+
+Verbs take positional args + stdin, never inline JSON. g never sends mail: every
+draft verb leaves a DRAFT in Gmail and you send it yourself.
+
+  g search "<gmail query>" [--max N]       list matching messages (id / from / subject / date)
+  g read <msg-id>                          read a message body + headers (lists attachments)
+  g attachment <msg-id> <n>                write attachment bytes to stdout (n from read; or an attachment-id)
+  g draft-reply <msg-id> [--cc a@b,c@d|--no-cc] [--from addr]        body on stdin -> threaded reply DRAFT
+  g draft-new <to> <subject..> [--cc a@b,c@d|--no-cc] [--from addr]  body on stdin -> fresh compose DRAFT
+  g draft-edit <draft-id> [--cc a@b,c@d|--no-cc] [--from addr]       body on stdin -> replace a draft's body IN PLACE
+  g drafts ["<gmail query>"] [--max N]     list drafts: draft-id / msg-id / thread / to / cc / subject
+  g draft-read <id>                        read a draft's body + headers (draft-id, thread-id, or msg-id)
+  g draft-rm <draft-id> [..]               draft(s) -> Trash -- DRAFTS ONLY, recoverable 30 days
+  g labels ["<substr>"]                    list labels by NAME -> id (optional name filter)
+  g label <msg-id> <name> [..]             add label(s) to a message, BY NAME (never IDs)
+  g unlabel <msg-id> <name>                remove a label from a message, BY NAME
+  g archive <msg-id>                       remove INBOX (file the message out of the inbox)
+  g label-new <name>                       create a new label (nest with '/', e.g. Clients/Acme)
+
+  --max N caps search/drafts (GMAX=N caps every call; default 25).
+  --from addr drafts as one of the account's VERIFIED send-as addresses instead of the default.
+  Config dir: $KNOWLEDGE_WORKER_STACK_GWS_CONFIG, else $GOOGLE_WORKSPACE_CLI_CONFIG_DIR, else ~/.config/gws.
+  Reading works with the gmail.readonly scope; drafts and labels need gmail.modify.
+
+Labels are ID-based in the Gmail API, but every label verb takes the human NAME
+and resolves it: a case-insensitive exact match on the full nested name. A miss
+dies with the closest matches, and `label` never creates a label (use label-new),
+so a typo cannot spawn a junk label. System labels (INBOX, TRASH, UNREAD...) are
+refused; archive is the one verb that removes INBOX.
+
+draft-reply delegates threading and quoting to gws's own `+reply --draft`.
+draft-new builds the MIME itself. Both always emit an HTML body (plain-text-only
+drafts render "raw" in some clients) and append the user's own default Gmail
+signature, so a draft looks like one written in Gmail. draft-edit replaces a draft's body in place (same draft-id), so a
+revision never creates a second draft in the thread; it keeps the draft's To,
+Subject and (unless --cc/--no-cc says otherwise) Cc. draft-rm removes ONLY
+drafts, by moving them to Trash rather than deleting them. Both draft-rm and
+draft-edit require the DRAFT label itself: Gmail keeps a draft id resolvable
+after the message is sent, so a resolving id is not proof it is still a draft.
+After a create or edit, g warns on stderr when other drafts exist in the same
+conversation.
+
+Cc, highest precedence first:
+  draft-reply: --no-cc > --cc > the original message's Cc (reply-all on Cc,
+               minus your own addresses and whoever the reply goes To)
+  draft-new:   --no-cc > --cc > none
+  draft-edit:  --no-cc > --cc > keep the draft's existing Cc
+Every draft confirmation re-reads the stored To and Cc from Gmail and prints
+them; an explicit --cc that did not land is an error, not a success.
+
+read/draft-read print From/To/Cc/Bcc/Reply-To/Subject/Date (header names matched
+case-insensitively) and render the body from the raw MIME: the text/plain part
+unless it is a stub next to a much longer HTML part, or Gmail soft-wrapped it.
+No length cap anywhere, so nothing is cut off silently.
+
+Gmail has three opaque ids: draft-id (drafts, draft-rm, draft-edit), message-id
+(read, attachment, label verbs) and thread-id. drafts prints all three, and
+draft-read accepts any of them.
+"""
+import sys, os, re, json, base64, subprocess, tempfile, email
+from email.message import EmailMessage
+from email import policy as email_policy
+from email.utils import getaddresses, formataddr
+from html import escape as _esc
+from html.parser import HTMLParser
+
+GWS = "gws"
+CONFIG_DIR = os.path.expanduser(os.environ.get("KNOWLEDGE_WORKER_STACK_GWS_CONFIG")
+                                or os.environ.get("GOOGLE_WORKSPACE_CLI_CONFIG_DIR")
+                                or "~/.config/gws")
+SCOPE_HINT = ("drafts and labels need the gmail.modify scope; the read-only setup cannot "
+              "write. See 'Add more later' in the google README.")
+
+USAGE = __doc__
+
+
+def die(msg):
+    sys.exit("g: " + msg)
+
+
+def check_signed_in(cfgdir):
+    """Fail early, with the fix, when gws has nothing to sign in with. gws also
+    accepts a token or a credentials file through its own environment variables."""
+    if any(os.environ.get(v) for v in ("GOOGLE_WORKSPACE_CLI_TOKEN",
+                                       "GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE")):
+        return
+    if not any(os.path.isfile(os.path.join(cfgdir, f))
+               for f in ("credentials.enc", "credentials.json")):
+        die("not signed in to Google (no credentials in %s). Run the sign-in step "
+            "in the google README: gws auth login --scopes ..." % cfgdir)
+
+
+def run_gws(cfgdir, args, capture=False, cwd=None):
+    env = dict(os.environ, GOOGLE_WORKSPACE_CLI_CONFIG_DIR=cfgdir)
+    try:
+        if capture:
+            return subprocess.run([GWS] + args, env=env, capture_output=True, text=True, cwd=cwd)
+        return subprocess.run([GWS] + args, env=env, cwd=cwd)
+    except FileNotFoundError:
+        die("gws is not installed (or not on PATH): brew install googleworkspace-cli")
+
+
+def gws_failed(args, stderr):
+    msg = "gws %s failed:\n%s" % (args_summary(args), stderr.strip())
+    if "insufficient" in stderr.lower() and "scope" in stderr.lower():
+        msg += "\n" + SCOPE_HINT
+    die(msg)
+
+
+def gws_json(cfgdir, args, cwd=None):
+    """Run a gws command and return parsed JSON. Some gws builds print a stray
+    "Using keyring backend: keyring" line onto stdout ahead of the JSON, so
+    slice from the first { or [ before parsing."""
+    r = run_gws(cfgdir, args + ["--format", "json"], capture=True, cwd=cwd)
+    if r.returncode != 0:
+        gws_failed(args, r.stderr + r.stdout)
+    out = r.stdout
+    m = re.search(r"[{\[]", out)
+    if m and m.start() > 0:
+        out = out[m.start():]
+    try:
+        return json.loads(out)
+    except json.JSONDecodeError:
+        die("could not parse gws JSON for: %s\n%s" % (args_summary(args), r.stdout[:400]))
+
+
+def drafts_write_raw(cfgdir, action, params, mime_bytes, thread_id=None):
+    """drafts create/update with the MIME shipped as an --upload FILE, never as
+    one argv string: a reply's raw MIME carries every attachment in the quoted
+    thread and can exceed the operating system's argument size limit. threadId
+    rides in --json alongside --upload. --upload refuses any path outside the
+    working directory, so gws runs from the temp dir that holds the file."""
+    args = ["gmail", "users", "drafts", action, "--params", json.dumps(params)]
+    if thread_id:
+        args += ["--json", json.dumps({"message": {"threadId": thread_id}})]
+    with tempfile.TemporaryDirectory() as td:
+        with open(os.path.join(td, "draft.eml"), "wb") as f:
+            f.write(mime_bytes)
+        return gws_json(cfgdir, args + ["--upload", "./draft.eml",
+                                        "--upload-content-type", "message/rfc822"],
+                        cwd=td)
+
+
+# reasons that mean "the id you gave me is not a thing", as opposed to "the call
+# itself failed". drafts.get answers 404 notFound for an unknown id, while
+# threads.get and messages.get answer 400 invalidArgument for the same id.
+SOFT_MISS_REASONS = {"notFound", "invalidArgument"}
+
+
+def args_summary(args):
+    """The gws args with the --params/--json payloads dropped, so the part of an
+    error that matters (HTTP 401 authError) is not pushed off the line."""
+    out, skip_next = [], False
+    for a in args:
+        if skip_next:
+            skip_next = False
+            continue
+        if a in ("--params", "--json", "--format", "--body"):
+            skip_next = True
+            continue
+        out.append(a)
+    return " ".join(out)
+
+
+def gws_json_soft(cfgdir, args):
+    """For lookups that are ALLOWED to come back empty ("is this id a draft?").
+    Returns (found, parsed, errmsg):
+
+      (True,  body, None)  the call succeeded
+      (False, body, None)  the call succeeded and says no such id
+      (False, body, "...") the CALL failed: expired sign-in, rate limit, 5xx
+
+    Telling the last two apart matters: an expired sign-in reported as "that
+    draft does not exist" leads a session to create a second draft."""
+    r = run_gws(cfgdir, args + ["--format", "json"], capture=True)
+    out = r.stdout
+    m = re.search(r"[{\[]", out)
+    if m and m.start() > 0:
+        out = out[m.start():]
+    try:
+        j = json.loads(out)
+    except json.JSONDecodeError:
+        return False, None, ("`gws %s` returned no parseable JSON (exit %d): %s"
+                             % (args_summary(args), r.returncode,
+                                (r.stderr.strip() or r.stdout.strip() or "no output")[:300]))
+    err = j.get("error") if isinstance(j, dict) else None
+    if err:
+        if err.get("code") == 404 or err.get("reason") in SOFT_MISS_REASONS:
+            return False, j, None
+        return False, j, ("HTTP %s %s from `gws %s`: %s"
+                          % (err.get("code", "?"), err.get("reason", ""), args_summary(args),
+                             str(err.get("message", "")).strip()[:300]))
+    if r.returncode != 0:
+        return False, j, ("`gws %s` exited %d: %s"
+                          % (args_summary(args), r.returncode, r.stderr.strip()[:300]))
+    return True, j, None
+
+
+_ACCOUNT = []
+
+
+def account_email(cfgdir):
+    """The signed-in mailbox's address (getProfile), fetched once per run."""
+    if not _ACCOUNT:
+        j = gws_json(cfgdir, ["gmail", "users", "getProfile",
+                              "--params", json.dumps({"userId": "me"})])
+        _ACCOUNT.append(j.get("emailAddress", ""))
+    return _ACCOUNT[0]
+
+
+def send_as_entries(cfgdir):
+    sa = gws_json(cfgdir, ["gmail", "users", "settings", "sendAs", "list",
+                           "--params", json.dumps({"userId": "me"})])
+    return sa.get("sendAs", [])
+
+
+def resolve_send_as(cfgdir, fallback, from_flag=None):
+    """The From + signature for a draft: the default send-as (what Gmail itself
+    uses) unless --from names another VERIFIED send-as entry of this account.
+    Gmail would silently rewrite an unverified From on send, so a miss dies
+    listing the verified choices and creates nothing."""
+    entries = send_as_entries(cfgdir)
+    if from_flag is None:
+        entry = (next((s for s in entries if s.get("isDefault")), None)
+                 or next((s for s in entries if s.get("isPrimary")), None)
+                 or {})
+        return entry.get("sendAsEmail", fallback), entry.get("signature", "") or ""
+    want = from_flag.strip().lower()
+    if not want:
+        die("--from needs a send-as address")
+    usable = [s for s in entries
+              if s.get("sendAsEmail") and s.get("verificationStatus", "accepted") == "accepted"]
+    entry = next((s for s in usable if s["sendAsEmail"].lower() == want), None)
+    if entry is None:
+        die("--from %s is not a verified send-as address on this account "
+            "(nothing created). Verified send-as: %s"
+            % (from_flag, ", ".join(sorted(s["sendAsEmail"] for s in usable)) or "(none)"))
+    return entry["sendAsEmail"], entry.get("signature", "") or ""
+
+
+def own_addresses(cfgdir, acct_email):
+    """Every address this account receives as -- the signed-in address plus
+    every send-as alias -- so a reply never Cc's the account back to itself."""
+    addrs = {acct_email.lower()}
+    for s in send_as_entries(cfgdir):
+        e = s.get("sendAsEmail")
+        if e:
+            addrs.add(e.lower())
+    return addrs
+
+
+def default_reply_cc(cfgdir, acct_email, orig_hdrs):
+    """The Cc a reply-all-on-Cc carries forward: the original's Cc, minus this
+    account's own addresses and minus the reply's own To (Reply-To if set, else
+    From). Display names kept; dedup by bare address, case-insensitive."""
+    own = own_addresses(cfgdir, acct_email)
+    to_be = orig_hdrs.get("reply-to") or orig_hdrs.get("from") or ""
+    exclude = own | {a.lower() for _, a in getaddresses([to_be]) if a}
+    seen, kept = set(), []
+    for name, addr in getaddresses([orig_hdrs.get("cc", "")]):
+        al = addr.lower()
+        if not al or al in exclude or al in seen:
+            continue
+        seen.add(al)
+        kept.append(formataddr((name, addr)) if name else addr)
+    return ", ".join(kept)
+
+
+def resolve_cc(cc_flag, no_cc, default_fn):
+    """The one Cc precedence chain, shared by all three draft verbs:
+    --no-cc beats --cc beats the verb's default (called last, lazily, since it
+    can cost an API call). An empty --cc "" is a deliberate clear.
+    Returns (cc, explicit_cc); explicit_cc arms enforce_cc_applied and is None
+    for --no-cc and the default tier."""
+    if no_cc:
+        return "", None
+    if cc_flag is not None:
+        cc = cc_flag.strip()
+        return cc, cc
+    return default_fn(), None
+
+
+def reject_unreachable_self_cc(explicit_cc, sender_addrs):
+    """gws +reply strips the sender out of --cc, so an explicit Cc naming the
+    sending address could never land. Refuse it BEFORE creating anything."""
+    if not explicit_cc:
+        return
+    named = {a.lower() for _, a in getaddresses([explicit_cc]) if a}
+    hit = sorted(named & {s.lower() for s in sender_addrs if s})
+    if hit:
+        die("draft-reply: --cc names this account's own address (%s), which gws "
+            "+reply strips out of a reply's Cc. Nothing was created. Drop it from "
+            "the Cc, or use --no-cc." % ", ".join(hit))
+
+
+def enforce_cc_applied(requested_cc, persisted_cc):
+    """Fail loudly when an explicit --cc did not make it into the stored draft.
+    persisted_cc must be RE-FETCHED from Gmail, never the value that was sent.
+    A no-op for the default tiers and for a deliberate empty ask."""
+    if not requested_cc:
+        return
+    want = {a.lower() for _, a in getaddresses([requested_cc]) if a}
+    got = {a.lower() for _, a in getaddresses([persisted_cc or ""]) if a}
+    missing = want - got
+    if missing:
+        sys.stderr.write(
+            "ERROR: requested Cc was not applied to the draft -- refusing to report success\n"
+            "  requested: %s\n  persisted: %s\n  missing:   %s\n"
+            % (requested_cc, persisted_cc or "(none)", ", ".join(sorted(missing))))
+        sys.exit(1)
+
+
+def addr_set(value):
+    """Bare addresses only, lowercased: "are these the same recipients?"."""
+    return {a.lower() for _, a in getaddresses([value or ""]) if a}
+
+
+def enforce_to_preserved(original_to, persisted_to):
+    """Fail loudly when an edit changed the draft's To line. draft-edit takes no
+    --to, so any difference is the tool changing recipients on its own. The
+    backstop behind preserve_to_in_raw."""
+    want, got = addr_set(original_to), addr_set(persisted_to)
+    lost, added = want - got, got - want
+    if lost or added:
+        sys.stderr.write(
+            "ERROR: the draft's To line was not preserved by the edit -- refusing to report success\n"
+            "  before: %s\n  after:  %s\n%s%s"
+            % (original_to or "(none)", persisted_to or "(none)",
+               ("  lost:   %s\n" % ", ".join(sorted(lost))) if lost else "",
+               ("  added:  %s\n" % ", ".join(sorted(added))) if added else ""))
+        sys.exit(1)
+
+
+def preserve_to_in_raw(raw_b64, want_to):
+    """Force want_to onto the To header of a base64url MIME payload and return
+    the new payload -- unchanged when its To already names the same addresses,
+    or None when there is no header block or To line to replace.
+
+    +reply recomputes To from the original message, which would drop a
+    recipient added to the draft by hand. Only the To line and its folded
+    continuations are touched; the rest of +reply's MIME (threading headers,
+    boundaries, quote, signature) is never re-serialized."""
+    raw = base64.urlsafe_b64decode(raw_b64 + "=" * (-len(raw_b64) % 4))
+    i_crlf, i_lf = raw.find(b"\r\n\r\n"), raw.find(b"\n\n")
+    if i_crlf != -1 and (i_lf == -1 or i_crlf <= i_lf):
+        nl, cut = b"\r\n", i_crlf
+    elif i_lf != -1:
+        nl, cut = b"\n", i_lf
+    else:
+        return None
+    head, body = raw[:cut], raw[cut:]
+    lines = head.split(nl)
+    start = next((i for i, ln in enumerate(lines) if ln.lower().startswith(b"to:")), None)
+    if start is None:
+        return None
+    end = start                                # swallow folded continuation lines
+    while end + 1 < len(lines) and lines[end + 1][:1] in (b" ", b"\t"):
+        end += 1
+    have = email.message_from_bytes(head, policy=email_policy.default).get("to", "")
+    if addr_set(str(have)) == addr_set(want_to):
+        return raw_b64
+    # refold_source="all": encoding and folding are decided by the policy, so a
+    # long list wraps and a non-ASCII display name is RFC2047-encoded.
+    pol = email_policy.SMTP.clone(linesep=nl.decode(), refold_source="all")
+    lines[start:end + 1] = pol.fold_binary("To", want_to).rstrip(b"\r\n").split(nl)
+    return base64.urlsafe_b64encode(nl.join(lines) + body).decode()
+
+
+def text_to_html(text):
+    return "".join("<div>%s</div>" % (_esc(ln) if ln else "<br>") for ln in text.split("\n"))
+
+
+def html_with_sig(body, signature):
+    # Gmail's signature HTML carries its own leading break
+    return '<div dir="ltr">%s%s</div>' % (text_to_html(body), signature)
+
+
+def stdin_body(verb):
+    body = sys.stdin.buffer.read().decode("utf-8", "replace").replace("\r\n", "\n").rstrip("\n")
+    if not body.strip():
+        die("%s: empty body on stdin" % verb)
+    return body
+
+
+def list_drafts(cfgdir, query=None):
+    params = {"userId": "me", "maxResults": 500}
+    if query:
+        params["q"] = query
+    j = gws_json(cfgdir, ["gmail", "users", "drafts", "list", "--params", json.dumps(params)])
+    return j.get("drafts") or []
+
+
+def draft_headers(cfgdir, msg_id):
+    """Subject / To / Cc / Date of a draft's message (metadata-only fetch)."""
+    h = msg_headers(cfgdir, msg_id, ["Subject", "To", "Cc", "Date"])
+    return h.get("subject", ""), h.get("to", ""), h.get("cc", ""), h.get("date", "")
+
+
+def msg_headers(cfgdir, msgid, names):
+    """{header-name-lower: value}, matched case-insensitively on our side
+    (a sender may spell "CC" where most write "Cc")."""
+    j = gws_json(cfgdir, ["gmail", "users", "messages", "get", "--params",
+                          json.dumps({"userId": "me", "id": msgid, "format": "metadata",
+                                      "metadataHeaders": names})])
+    return {h["name"].lower(): h["value"] for h in j.get("payload", {}).get("headers", [])}
+
+
+def list_attachments(cfgdir, msgid):
+    """Attachment parts (filename / mime / size / attachmentId) of a message."""
+    j = gws_json(cfgdir, ["gmail", "users", "messages", "get",
+                          "--params", json.dumps({"userId": "me", "id": msgid})])
+    out = []
+
+    def walk(p):
+        b = p.get("body", {})
+        if b.get("attachmentId"):
+            out.append({"filename": p.get("filename", ""), "mime": p.get("mimeType", "?"),
+                        "size": b.get("size", 0), "id": b["attachmentId"]})
+        for c in p.get("parts", []):
+            walk(c)
+
+    walk(j.get("payload", {}))
+    return out
+
+
+HEADER_ORDER = ("From", "To", "Cc", "Bcc", "Reply-To", "Subject", "Date")
+
+# ---- body rendering: g owns this end to end, because gws's own `+read` can
+# drop an HTML-only body and cut a long unwrapped line ----------------------
+
+_HTML_BLOCK_TAGS = {"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5",
+                    "h6", "blockquote", "table", "ul", "ol", "hr"}
+_HTML_SKIP_TAGS = {"script", "style", "head", "title"}
+
+
+class _HTMLToText(HTMLParser):
+    """Minimal HTML->text: block tags become newlines, <a href> keeps its
+    target ("text <href>", or bare "<href>" for an image-only link),
+    script/style/head/title are dropped, entities are decoded."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self._out = []
+        self._skip_depth = 0
+        self._link_href = None
+        self._link_start = None
+
+    def handle_starttag(self, tag, attrs):
+        tag = tag.lower()
+        if tag in _HTML_SKIP_TAGS:
+            self._skip_depth += 1
+            return
+        if self._skip_depth:
+            return
+        if tag == "a":
+            self._link_href = dict(attrs).get("href")
+            self._link_start = len(self._out)
+        elif tag == "br":
+            self._out.append("\n")
+        elif tag == "li":
+            self._newline()
+            self._out.append("- ")
+        elif tag in _HTML_BLOCK_TAGS:
+            self._newline()
+
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+        if tag in _HTML_SKIP_TAGS:
+            self._skip_depth = max(0, self._skip_depth - 1)
+            return
+        if self._skip_depth:
+            return
+        if tag == "a":
+            href, start = self._link_href, self._link_start
+            self._link_href = None
+            if href and not href.startswith("#") and href.strip():
+                text = "".join(self._out[start:]).strip()
+                if not text:
+                    self._out.append(href)
+                elif text != href:
+                    self._out.append(" <%s>" % href)
+        elif tag in _HTML_BLOCK_TAGS:
+            self._newline()
+
+    def handle_data(self, data):
+        if not self._skip_depth:
+            self._out.append(data)
+
+    def _newline(self):
+        if self._out and not "".join(self._out[-1:]).endswith("\n"):
+            self._out.append("\n")
+
+    def text(self):
+        return "".join(self._out)
+
+
+def html_to_text(html_str):
+    p = _HTMLToText()
+    p.feed(html_str)
+    p.close()
+    return p.text()
+
+
+# invisible padding that mailing-list senders stuff into previews: word joiner,
+# zero-width space/non-joiner/joiner, BOM, soft hyphen, combining grapheme joiner
+_INVISIBLE_RE = re.compile("[⁠​‌‍﻿­͏]")
+_SPACE_LIKE_RE = re.compile("[  ]")   # nbsp / figure-space -> normal space
+_MULTISPACE_RE = re.compile(r"[ \t]{2,}")
+
+
+def clean_text(s):
+    """Strip invisible junk, normalize odd whitespace, cap blank-line runs at 2.
+    Never truncates."""
+    s = _INVISIBLE_RE.sub("", s)
+    s = _SPACE_LIKE_RE.sub(" ", s)
+    lines, blank = [], 0
+    for ln in s.split("\n"):
+        ln = _MULTISPACE_RE.sub(" ", ln).rstrip()
+        if ln == "":
+            blank += 1
+            if blank <= 2:
+                lines.append(ln)
+        else:
+            blank = 0
+            lines.append(ln)
+    return "\n".join(lines).strip("\n")
+
+
+def _decode_part(part):
+    charset = part.get_content_charset() or "utf-8"
+    payload = part.get_payload(decode=True) or b""
+    try:
+        return payload.decode(charset, errors="replace")
+    except LookupError:
+        return payload.decode("utf-8", errors="replace")
+
+
+def _extract_bodies(msg):
+    """(plain, html): the first text/plain and text/html parts, skipping
+    containers and attachments."""
+    plain = html = None
+    for part in msg.walk():
+        if part.is_multipart():
+            continue
+        if (part.get_content_disposition() or "").lower() == "attachment":
+            continue
+        ctype = part.get_content_type()
+        if ctype == "text/plain" and plain is None:
+            plain = _decode_part(part)
+        elif ctype == "text/html" and html is None:
+            html = _decode_part(part)
+    return plain or "", html or ""
+
+
+def fetch_raw_message(cfgdir, msgid):
+    """Full RFC822 message via format=raw, parsed with the email module."""
+    j = gws_json(cfgdir, ["gmail", "users", "messages", "get", "--params",
+                          json.dumps({"userId": "me", "id": msgid, "format": "raw"})])
+    raw = j.get("raw")
+    if not raw:
+        die("read: Gmail returned no raw payload for %s" % msgid)
+    data = base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4))
+    return email.message_from_bytes(data, policy=email_policy.default)
+
+
+def _plain_is_soft_wrapped(plain_raw):
+    """Gmail hard-wraps text/plain near 72-76 columns without a format=flowed
+    marker, but every wrapped line ends in a trailing space while real breaks
+    do not. Several such lines means real wrapping."""
+    lines = plain_raw.split("\n")
+    wrapped = sum(1 for ln in lines if ln.rstrip("\r").endswith(" "))
+    non_blank = sum(1 for ln in lines if ln.strip())
+    return wrapped >= 3 and wrapped > 0.3 * max(non_blank, 1)
+
+
+_LIST_MARKER_RE = re.compile("^\\s*([-*•]\\s|\\d+\\.\\s)")
+
+
+def _unwrap_soft_wrapped_plain(plain_raw):
+    """Rejoin each paragraph's soft-wrapped lines, but start a fresh line at
+    every list marker so a wrapped bullet never swallows the next one."""
+    raw_lines = [ln.rstrip("\r") for ln in plain_raw.split("\n")]
+    out, prev_wrapped = [], False
+    for ln in raw_lines:
+        if out and prev_wrapped and ln.strip() and not _LIST_MARKER_RE.match(ln):
+            out[-1] = out[-1].rstrip(" ") + " " + ln.strip()
+        else:
+            out.append(ln)
+        prev_wrapped = ln.endswith(" ") and bool(ln.strip())
+    return "\n".join(l.rstrip(" ") for l in out)
+
+
+def render_body(msg):
+    """Pick the part that actually has the content:
+    (1) plain under 25% of the HTML render (a stub) -> HTML;
+    (2) plain soft-wrapped by Gmail and HTML exists -> HTML (stored unwrapped);
+    (3) plain soft-wrapped, no HTML -> unwrap plain ourselves;
+    otherwise plain, or HTML if there is no plain part."""
+    plain_raw, html_raw = _extract_bodies(msg)
+    plain = clean_text(plain_raw)
+    html_text = clean_text(html_to_text(html_raw)) if html_raw else ""
+
+    if plain and html_text and len(plain) < 0.25 * len(html_text):
+        sys.stderr.write(
+            "note: text/plain part is a %d-char stub next to a %d-char HTML "
+            "render; showing the HTML body\n" % (len(plain), len(html_text)))
+        return html_text
+    if plain and _plain_is_soft_wrapped(plain_raw):
+        if html_text:
+            sys.stderr.write("note: text/plain part is soft-wrapped; showing the "
+                             "unwrapped HTML body instead\n")
+            return html_text
+        sys.stderr.write("note: text/plain part is soft-wrapped with no HTML "
+                         "alternative; unwrapping it directly\n")
+        return clean_text(_unwrap_soft_wrapped_plain(plain_raw))
+    if plain:
+        return plain
+    if html_text:
+        return html_text
+    return "(no text or HTML body found)"
+
+
+def read_msg(cfgdir, msgid):
+    hdrs = msg_headers(cfgdir, msgid, list(HEADER_ORDER))
+    msg = fetch_raw_message(cfgdir, msgid)
+    body = render_body(msg)
+    for name in HEADER_ORDER:
+        v = hdrs.get(name.lower())
+        if v:
+            print("%s: %s" % (name, v))
+    print("---")
+    print(body)
+    atts = list_attachments(cfgdir, msgid)
+    if atts:
+        print("\nAttachments (%d):" % len(atts))
+        for i, a in enumerate(atts, 1):
+            print("  %d. %s  %s  %.0f KB" % (i, a["filename"] or "(inline)", a["mime"],
+                                             max(a["size"], 1) / 1024.0))
+        print("  save one:  g attachment %s <n> > <filename>" % msgid)
+
+
+def attachment_fetch(cfgdir, msgid, sel):
+    atts = list_attachments(cfgdir, msgid)
+    if not atts:
+        die("attachment: message %s has no attachments" % msgid)
+    if sel.isdigit() and 1 <= int(sel) <= len(atts):
+        att = atts[int(sel) - 1]
+    else:
+        att = next((a for a in atts if a["id"] == sel), None)
+    if att is None:
+        die("attachment: no such attachment '%s' (use 1..%d from read, or an attachment-id)"
+            % (sel, len(atts)))
+    j = gws_json(cfgdir, ["gmail", "users", "messages", "attachments", "get", "--params",
+                          json.dumps({"userId": "me", "messageId": msgid, "id": att["id"]})])
+    data = j.get("data")
+    if not data:
+        die("attachment: Gmail returned no data for %s" % att["id"])
+    blob = base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
+    sys.stdout.buffer.write(blob)
+    sys.stderr.write("wrote %d bytes (%s, %s) to stdout\n"
+                     % (len(blob), att["filename"] or "inline", att["mime"]))
+
+
+def warn_siblings(sib_ids):
+    """stderr nudge: one draft per conversation."""
+    if not sib_ids:
+        return
+    sys.stderr.write(
+        "NOTE: %d other draft(s) in this conversation: %s\n"
+        "  One draft per thread -- show the user current vs proposed; after their OK:\n"
+        "  g draft-rm %s\n" % (len(sib_ids), " ".join(sib_ids), " ".join(sib_ids)))
+
+
+def take_flag_value(args, flag):
+    """Pull `flag VALUE` out of args wherever it occurs, before a variadic
+    positional (draft-new's subject) can swallow it. Returns (args, value);
+    value is None when absent. Use --cc "" for an intentional empty."""
+    args, value = list(args), None
+    i = 0
+    while i < len(args):
+        if args[i] == flag:
+            if i + 1 >= len(args):
+                die("%s needs a value (use '' for explicit empty)" % flag)
+            value = args[i + 1]
+            del args[i:i + 2]
+        else:
+            i += 1
+    return args, value
+
+
+def take_flag(args, flag):
+    present = flag in args
+    return [a for a in args if a != flag], present
+
+
+MAXHINT = "--max N (GMAX=N sets it for every call)"
+
+
+def resolve_max(flag):
+    """--max beats GMAX beats 25. g applies the cap itself so it means the same
+    on search and drafts."""
+    val = flag if flag is not None else os.environ.get("GMAX", "25")
+    if not val.isdigit() or int(val) < 1:
+        die("--max/GMAX needs a positive whole number, got %r" % val)
+    return val
+
+
+def reject_unknown_flags(verb, args, known="--cc a@b,c@d, --no-cc and --from <send-as address>"):
+    """Die on any --token left after the known flags are extracted. Otherwise a
+    typo'd flag becomes data: part of a subject, a search query, or a label name."""
+    for a in args:
+        if a.startswith("--"):
+            die("%s: unknown flag %s (known flags: %s)" % (verb, a, known))
+
+
+def draft_reply(cfgdir, msgid, no_cc=False, cc_flag=None, from_flag=None):
+    body = stdin_body("draft-reply")
+    acct_email = account_email(cfgdir)
+    from_email, signature = resolve_send_as(cfgdir, acct_email, from_flag)
+    cc, explicit_cc = resolve_cc(cc_flag, no_cc, lambda: default_reply_cc(
+        cfgdir, acct_email, msg_headers(cfgdir, msgid, ["From", "Cc", "Reply-To"])))
+    reject_unreachable_self_cc(explicit_cc, {from_email, acct_email})
+
+    # --draft is what keeps +reply from sending; never drop it
+    args = ["gmail", "+reply", "--message-id", msgid, "--from", from_email,
+            "--draft", "--html", "--body", html_with_sig(body, signature)]
+    if cc:
+        args += ["--cc", cc]
+    res = gws_json(cfgdir, args)
+    did = res.get("id") or res.get("message", {}).get("id", "?")
+    mid = res.get("message", {}).get("id", "")
+    tid = res.get("message", {}).get("threadId", "")
+
+    persisted = msg_headers(cfgdir, mid, ["To", "Cc"]) if mid else {}
+    sys.stderr.write(
+        "draft created (NOT sent)  id=%s  thread=%s\n"
+        "  From: %s\n  To: %s\n%s  Signature: %s\n"
+        % (did, tid or "?", from_email, persisted.get("to", "?"),
+           ("  Cc: %s\n" % persisted["cc"]) if persisted.get("cc") else "",
+           "yes (%d chars)" % len(signature) if signature else "none set"))
+    enforce_cc_applied(explicit_cc, persisted.get("cc", ""))
+    warn_siblings([d["id"] for d in list_drafts(cfgdir)
+                   if d["id"] != did and d.get("message", {}).get("threadId") == tid])
+
+
+def draft_new(cfgdir, to, subject, no_cc=False, cc_flag=None, from_flag=None):
+    body = stdin_body("draft-new")
+    from_email, signature = resolve_send_as(cfgdir, account_email(cfgdir), from_flag)
+    cc, explicit_cc = resolve_cc(cc_flag, no_cc, lambda: "")
+
+    m = EmailMessage()
+    m["From"], m["To"], m["Subject"] = from_email, to, subject
+    if cc:
+        m["Cc"] = cc
+    m.set_content(html_with_sig(body, signature), subtype="html", charset="utf-8")
+
+    res = drafts_write_raw(cfgdir, "create", {"userId": "me"}, m.as_bytes())
+    did = res.get("id", "?")
+    mid = res.get("message", {}).get("id", "")
+
+    _, persisted_to, persisted_cc, _ = draft_headers(cfgdir, mid) if mid else ("", to, "", "")
+    sys.stderr.write(
+        "draft created (NOT sent)  id=%s\n  To: %s\n%s  Subject: %s\n  From: %s\n  Signature: %s\n"
+        % (did, persisted_to or to, ("  Cc: %s\n" % persisted_cc) if persisted_cc else "",
+           subject, from_email,
+           "yes (%d chars)" % len(signature) if signature else "none set"))
+    enforce_cc_applied(explicit_cc, persisted_cc)
+    # a fresh compose starts its own thread, so siblings are drafts with the same subject
+    warn_siblings([d["id"] for d in
+                   list_drafts(cfgdir, 'subject:"%s"' % subject.replace('"', ''))
+                   if d["id"] != did])
+
+
+def drafts_list(cfgdir, query, cap):
+    ds = list_drafts(cfgdir, query)
+    if not ds:
+        print("no drafts" + (" matching %r" % query if query else ""))
+        return
+    cap = int(cap)
+    # to/cc printed in full: a truncated column is where a missing Cc hides
+    print("%-24s %-18s %-18s %-30s %-30s %s" % ("draft-id", "msg-id", "thread", "to", "cc", "subject"))
+    for d in ds[:cap]:
+        msg = d.get("message", {})
+        subj, to, cc, _ = draft_headers(cfgdir, msg.get("id", ""))
+        print("%-24s %-18s %-18s %-30s %-30s %s" % (d["id"], msg.get("id", "?"),
+                                                     msg.get("threadId", "?"), to, cc, subj))
+    if len(ds) > cap:
+        print("... and %d more (--max N or GMAX=N raises the cap)" % (len(ds) - cap))
+
+
+def resolve_any_to_msgid(cfgdir, ident):
+    """A draft-read id may be a draft-id, a thread-id or a message-id. Try each
+    and return (message-id, labelIds); a lookup that FAILS (expired sign-in,
+    rate limit) is never reported as a miss."""
+    def lookup(kind, params):
+        found, j, err = gws_json_soft(cfgdir, ["gmail", "users", kind, "get",
+                                               "--params", json.dumps(params)])
+        if err:
+            die("draft-read: could not look up '%s' -- %s" % (ident, err))
+        return j if found else None
+
+    j = lookup("drafts", {"userId": "me", "id": ident})
+    if j and j.get("message", {}).get("id"):
+        return j["message"]["id"], j["message"].get("labelIds", [])
+
+    j = lookup("threads", {"userId": "me", "id": ident, "format": "metadata",
+                           "metadataHeaders": ["Message-ID"]})
+    if j and j.get("messages"):
+        msgs = j["messages"]
+        draft_msgs = [m for m in msgs if "DRAFT" in m.get("labelIds", [])]
+        pick = draft_msgs[-1] if draft_msgs else msgs[-1]
+        return pick["id"], pick.get("labelIds", [])
+
+    j = lookup("messages", {"userId": "me", "id": ident, "format": "metadata"})
+    if j and j.get("id"):
+        return j["id"], j.get("labelIds", [])
+
+    die("draft-read: '%s' is not a draft-id, thread-id, or message-id" % ident)
+
+
+def require_draft_label(verb, ident, msg):
+    """Refuse an id whose message is no longer a DRAFT. Gmail keeps a draft id
+    resolvable after its message is sent (now labeled SENT), so only the DRAFT
+    label proves it is still a draft."""
+    labels = msg.get("labelIds", [])
+    if "DRAFT" not in labels:
+        die("%s: '%s' is no longer a draft -- Gmail keeps a draft id valid after its "
+            "message is sent, and this one now carries %s. Nothing was changed."
+            % (verb, ident, "/".join(labels) or "no labels"))
+
+
+def draft_read(cfgdir, ident):
+    msgid, labels = resolve_any_to_msgid(cfgdir, ident)
+    if "DRAFT" not in labels:
+        # a plain message id is allowed here; say so, so a sent message never
+        # reads like a live draft
+        sys.stderr.write("NOTE: %s is not a draft (labels: %s) -- showing the message it "
+                         "names\n" % (ident, "/".join(labels) or "none"))
+    read_msg(cfgdir, msgid)
+
+
+def draft_rm(cfgdir, draft_ids):
+    for did in draft_ids:
+        found, j, err = gws_json_soft(cfgdir, ["gmail", "users", "drafts", "get", "--params",
+                                               json.dumps({"userId": "me", "id": did})])
+        if err:
+            die("draft-rm: could not check whether '%s' is a draft, so nothing was "
+                "removed -- %s" % (did, err))
+        if not found or not j.get("message"):
+            die("draft-rm: '%s' is not an existing draft -- only drafts can be removed; "
+                "sent/received mail is untouchable" % did)
+        msg = j["message"]
+        require_draft_label("draft-rm", did, msg)
+        msg_id = msg.get("id", "")
+        subj, _, _, _ = draft_headers(cfgdir, msg_id)
+        # Trash the draft's message rather than drafts.delete, which is permanent.
+        # In Trash Gmail keeps it 30 days, and restoring it brings the draft back.
+        r = run_gws(cfgdir, ["gmail", "users", "messages", "trash", "--params",
+                             json.dumps({"userId": "me", "id": msg_id})], capture=True)
+        if r.returncode != 0:
+            die("draft-rm: could not move draft %s to Trash, so it is unchanged:\n%s"
+                % (did, r.stderr.strip()))
+        sys.stderr.write("draft %s (%r) moved to Trash -- recoverable for 30 days in "
+                         "Gmail > Trash\n" % (did, subj))
+
+
+def draft_message_meta(cfgdir, draft_id):
+    """(threadId, {header-name-lower: value}) for a draft's message. Dies if the
+    id is not a live draft."""
+    found, j, err = gws_json_soft(cfgdir, ["gmail", "users", "drafts", "get", "--params",
+                                           json.dumps({"userId": "me", "id": draft_id,
+                                                       "format": "metadata",
+                                                       "metadataHeaders": ["Subject", "To", "Cc",
+                                                                           "In-Reply-To",
+                                                                           "References"]})])
+    if err:
+        die("draft-edit: could not read draft '%s' -- %s" % (draft_id, err))
+    if not found or not j.get("message"):
+        die("draft-edit: '%s' is not an existing draft -- only drafts can be edited" % draft_id)
+    msg = j["message"]
+    require_draft_label("draft-edit", draft_id, msg)
+    hdrs = {h["name"].lower(): h["value"] for h in msg.get("payload", {}).get("headers", [])}
+    return msg.get("threadId", ""), hdrs
+
+
+def resolve_reply_target(cfgdir, thread_id, in_reply_to):
+    """Gmail message-id of the message a reply draft answers, matched by its
+    Message-ID against the draft's In-Reply-To; else the thread's last
+    non-draft message."""
+    j = gws_json(cfgdir, ["gmail", "users", "threads", "get", "--params",
+                          json.dumps({"userId": "me", "id": thread_id, "format": "metadata",
+                                      "metadataHeaders": ["Message-ID"]})])
+    want = in_reply_to.strip()
+    for m in j.get("messages", []):
+        for h in m.get("payload", {}).get("headers", []):
+            if h["name"].lower() == "message-id" and h["value"].strip() == want:
+                return m["id"]
+    non_draft = [m for m in j.get("messages", []) if "DRAFT" not in m.get("labelIds", [])]
+    if non_draft:
+        return non_draft[-1]["id"]
+    die("draft-edit: could not resolve the message this reply answers (thread %s)" % thread_id)
+
+
+def draft_edit(cfgdir, draft_id, no_cc=False, cc_flag=None, from_flag=None):
+    body = stdin_body("draft-edit")
+    from_email, signature = resolve_send_as(cfgdir, account_email(cfgdir), from_flag)
+    thread_id, hdrs = draft_message_meta(cfgdir, draft_id)
+    in_reply_to = hdrs.get("in-reply-to", "").strip()
+    new_cc, explicit_cc = resolve_cc(cc_flag, no_cc, lambda: hdrs.get("cc", ""))
+
+    cleanup_failure = None
+    if in_reply_to:
+        # reply: rebuild threading + quote through a throwaway +reply draft, copy
+        # its MIME into the target in place, then delete the throwaway. The Cc is
+        # re-passed explicitly, or the rebuild would drop it.
+        orig = resolve_reply_target(cfgdir, thread_id, in_reply_to)
+        temp_args = ["gmail", "+reply", "--message-id", orig, "--from", from_email,
+                     "--draft", "--html", "--body", html_with_sig(body, signature)]
+        if new_cc:
+            temp_args += ["--cc", new_cc]
+        temp = gws_json(cfgdir, temp_args)
+        temp_id = temp.get("id")
+        if not temp_id:
+            die("draft-edit: +reply returned no draft id, so its rebuilt reply can be "
+                "neither copied nor cleaned up. Nothing was changed; look for a stray "
+                "draft in this thread:\n%s" % json.dumps(temp)[:300])
+        # try/finally: any exit from here must not leave the throwaway sitting in
+        # the conversation as a second draft
+        try:
+            got = gws_json(cfgdir, ["gmail", "users", "drafts", "get", "--params",
+                                    json.dumps({"userId": "me", "id": temp_id,
+                                                "format": "raw"})])
+            temp_raw = (got or {}).get("message", {}).get("raw")
+            if not temp_raw:
+                die("draft-edit: throwaway draft %s carried no raw MIME, so there is "
+                    "nothing to copy into %s (left unchanged)" % (temp_id, draft_id))
+            draft_to = hdrs.get("to", "").strip()
+            if draft_to:
+                kept = preserve_to_in_raw(temp_raw, draft_to)
+                if kept is None:
+                    die("draft-edit: could not read a To header out of the rebuilt "
+                        "reply, so the draft's own To (%s) could not be preserved -- "
+                        "%s left unchanged" % (draft_to, draft_id))
+                temp_raw = kept
+            drafts_write_raw(cfgdir, "update", {"userId": "me", "id": draft_id},
+                             base64.urlsafe_b64decode(temp_raw + "=" * (-len(temp_raw) % 4)),
+                             thread_id=thread_id)
+        finally:
+            # delete answers an empty 204: check the exit code, never parse JSON
+            r = run_gws(cfgdir, ["gmail", "users", "drafts", "delete", "--params",
+                                 json.dumps({"userId": "me", "id": temp_id})], capture=True)
+            if r.returncode != 0:
+                cleanup_failure = ("throwaway draft %s left behind in this thread -- "
+                                   "remove it before showing the draft:\n"
+                                   "  g draft-rm %s\n%s"
+                                   % (temp_id, temp_id, r.stderr.strip()))
+        kind = "reply"
+    else:
+        # fresh compose: re-render the new body onto the same To/Cc/Subject
+        m = EmailMessage()
+        m["From"], m["To"], m["Subject"] = from_email, hdrs.get("to", ""), hdrs.get("subject", "")
+        if new_cc:
+            m["Cc"] = new_cc
+        m.set_content(html_with_sig(body, signature), subtype="html", charset="utf-8")
+        drafts_write_raw(cfgdir, "update", {"userId": "me", "id": draft_id},
+                         m.as_bytes(), thread_id=thread_id or None)
+        kind = "compose"
+
+    _, verify_hdrs = draft_message_meta(cfgdir, draft_id)
+    sys.stderr.write(
+        "draft %s edited in place (%s, NOT sent)\n  From: %s\n  To: %s\n%s  Signature: %s\n"
+        % (draft_id, kind, from_email, verify_hdrs.get("to", "?"),
+           ("  Cc: %s\n" % verify_hdrs["cc"]) if verify_hdrs.get("cc") else "",
+           "yes (%d chars)" % len(signature) if signature else "none set"))
+    enforce_cc_applied(explicit_cc, verify_hdrs.get("cc", ""))
+    enforce_to_preserved(hdrs.get("to", ""), verify_hdrs.get("to", ""))
+    if thread_id:
+        warn_siblings([d["id"] for d in list_drafts(cfgdir)
+                       if d["id"] != draft_id
+                       and d.get("message", {}).get("threadId") == thread_id])
+    # last, and non-zero: the edit landed, but a stray draft did not go away
+    if cleanup_failure:
+        die("draft-edit: the edit succeeded but cleanup did NOT -- " + cleanup_failure)
+
+
+def list_labels(cfgdir):
+    j = gws_json(cfgdir, ["gmail", "users", "labels", "list",
+                          "--params", json.dumps({"userId": "me"})])
+    return j.get("labels", [])
+
+
+def resolve_label(cfgdir, name):
+    """Label NAME -> (id, canonical name). Case-insensitive exact match; a miss
+    dies with the closest substring matches."""
+    labels = list_labels(cfgdir)
+    for l in labels:
+        if l.get("name", "").lower() == name.lower():
+            if l.get("type") == "system":  # INBOX, TRASH, SPAM, UNREAD...: each has its own path or none
+                die("%r is a Gmail system label; label and unlabel take only your own labels. %s"
+                    % (l["name"], {"INBOX": "To file a message out of the inbox: g archive <msg-id>.",
+                                   "TRASH": "To trash a message: gws gmail users messages trash (see the rules)."}
+                       .get(l["id"], "g does not change system labels.")))
+            return l["id"], l["name"]
+    hits = sorted(l["name"] for l in labels if name.lower() in l.get("name", "").lower())
+    if hits:
+        die("no label named %r. close matches: %s\n  (create with: g label-new '%s')"
+            % (name, ", ".join(hits), name))
+    die("no label named %r and no close match. create it: g label-new '%s'" % (name, name))
+
+
+def modify_labels(cfgdir, msgid, add=None, remove=None):
+    body = {}
+    if add:
+        body["addLabelIds"] = add
+    if remove:
+        body["removeLabelIds"] = remove
+    return gws_json(cfgdir, ["gmail", "users", "messages", "modify",
+                             "--params", json.dumps({"userId": "me", "id": msgid}),
+                             "--json", json.dumps(body)])
+
+
+def labels_list(cfgdir, substr=None):
+    labels = list_labels(cfgdir)
+    user = sorted((l for l in labels if l.get("type") == "user"),
+                  key=lambda x: x["name"].lower())
+    if substr:
+        user = [l for l in user if substr.lower() in l["name"].lower()]
+    if not user:
+        print("no labels" + (" matching %r" % substr if substr else ""))
+        return
+    print("%-44s %s" % ("label", "id"))
+    for l in user:
+        print("%-44s %s" % (l["name"], l["id"]))
+
+
+def label_apply(cfgdir, msgid, names):
+    ids, canon = [], []
+    for n in names:                        # resolve all names first -- all-or-nothing
+        lid, lname = resolve_label(cfgdir, n)
+        ids.append(lid)
+        canon.append(lname)
+    modify_labels(cfgdir, msgid, add=ids)
+    sys.stderr.write("labeled %s  +=  %s\n" % (msgid, ", ".join(canon)))
+
+
+def label_remove(cfgdir, msgid, name):
+    lid, lname = resolve_label(cfgdir, name)
+    modify_labels(cfgdir, msgid, remove=[lid])
+    sys.stderr.write("unlabeled %s  -=  %s\n" % (msgid, lname))
+
+
+def archive_msg(cfgdir, msgid):
+    modify_labels(cfgdir, msgid, remove=["INBOX"])
+    sys.stderr.write("archived %s (removed INBOX)\n" % msgid)
+
+
+def label_new(cfgdir, name):
+    for l in list_labels(cfgdir):
+        if l.get("name", "").lower() == name.lower():
+            die("label %r already exists (id %s)" % (l["name"], l["id"]))
+    res = gws_json(cfgdir, ["gmail", "users", "labels", "create",
+                            "--params", json.dumps({"userId": "me"}),
+                            "--json", json.dumps({"name": name,
+                                                  "labelListVisibility": "labelShow",
+                                                  "messageListVisibility": "show"})])
+    sys.stderr.write("created label %r (id %s)\n" % (res.get("name", name), res.get("id", "?")))
+
+
+def main():
+    if len(sys.argv) < 2:
+        sys.exit(USAGE)
+    verb, rest = sys.argv[1], sys.argv[2:]
+    if verb in ("-h", "--help", "help"):
+        sys.stdout.write(USAGE)
+        return
+    cfgdir = CONFIG_DIR
+    check_signed_in(cfgdir)
+
+    # verbs other than these five take no flags and pass their tail on as data
+    if verb not in ("search", "drafts", "draft-reply", "draft-new", "draft-edit"):
+        reject_unknown_flags(verb, rest, "none, this verb takes no flags")
+
+    if verb == "search":
+        rest, max_flag = take_flag_value(rest, "--max")
+        reject_unknown_flags(verb, rest, MAXHINT)
+        if not rest:
+            die("search needs a query")
+        sys.exit(run_gws(cfgdir, ["gmail", "+triage", "--query", " ".join(rest),
+                                  "--max", resolve_max(max_flag)]).returncode)
+    elif verb == "read":
+        if not rest:
+            die("read needs <msg-id>")
+        read_msg(cfgdir, rest[0])
+    elif verb == "attachment":
+        if len(rest) < 2:
+            die("attachment needs <msg-id> <n|attachment-id>")
+        attachment_fetch(cfgdir, rest[0], rest[1])
+    elif verb in ("draft-reply", "draft-new", "draft-edit"):
+        rest, no_cc = take_flag(rest, "--no-cc")
+        rest, cc_flag = take_flag_value(rest, "--cc")
+        rest, from_flag = take_flag_value(rest, "--from")
+        reject_unknown_flags(verb, rest)
+        kw = dict(no_cc=no_cc, cc_flag=cc_flag, from_flag=from_flag)
+        if verb == "draft-new":
+            if len(rest) < 2:
+                die("draft-new needs <to> <subject>")
+            draft_new(cfgdir, rest[0], " ".join(rest[1:]), **kw)
+        elif not rest:
+            die("%s needs <%s>" % (verb, "msg-id" if verb == "draft-reply" else "draft-id"))
+        elif verb == "draft-reply":
+            draft_reply(cfgdir, rest[0], **kw)
+        else:
+            draft_edit(cfgdir, rest[0], **kw)
+    elif verb == "drafts":
+        rest, max_flag = take_flag_value(rest, "--max")
+        reject_unknown_flags(verb, rest, MAXHINT)
+        drafts_list(cfgdir, " ".join(rest) if rest else None, resolve_max(max_flag))
+    elif verb == "draft-read":
+        if not rest:
+            die("draft-read needs <draft-id|thread-id|msg-id>")
+        draft_read(cfgdir, rest[0])
+    elif verb == "draft-rm":
+        if not rest:
+            die("draft-rm needs <draft-id>")
+        draft_rm(cfgdir, rest)
+    elif verb == "labels":
+        labels_list(cfgdir, rest[0] if rest else None)
+    elif verb == "label":
+        if len(rest) < 2:
+            die("label needs <msg-id> <name> [<name>..]")
+        label_apply(cfgdir, rest[0], rest[1:])
+    elif verb == "unlabel":
+        if len(rest) < 2:
+            die("unlabel needs <msg-id> <name>")
+        label_remove(cfgdir, rest[0], rest[1])
+    elif verb == "archive":
+        if not rest:
+            die("archive needs <msg-id>")
+        archive_msg(cfgdir, rest[0])
+    elif verb == "label-new":
+        if not rest:
+            die("label-new needs <name>")
+        label_new(cfgdir, " ".join(rest))
+    else:
+        die("unknown verb %r (g --help lists them)" % verb)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# hr — resume the session that last lived in THIS herdr tab. herdr exports HERDR_TAB_ID into every pane
+# it spawns, so the tab already knows which one it is: no argument, no uuid, no picker. In a tab left bare
+# by a restart, it brings the right session back.
+#   hr                    resume this tab's session
+#   hr -n                 print "<uuid> <title>" and stop — check without resuming
+#   hr --force            resume even though the tab has been renamed since
+#   hr wA:t2F             ask about another tab instead of this one
+#   hr --model opus       anything else is passed through to cr, one-shot for this resume
+#   hr   (outside herdr)  resume every session that was running when herdr stopped
+#   hr --list             what each recent hourly backup holds, hour by hour
+#   hr --from 20261028_1400   restore the set that was running at that hour instead of the last one
+# The lookup runs in herdr_session_resolve_tab.py, which reads files only and never the herdr socket —
+# the socket refuses CLI calls in exactly the situation hr exists for (a herdr upgrade waiting on a restart).
+
+case "${1:-}" in -h|--help) awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$0"; exit 0 ;; esac
+# --from and --list are about the WHOLE set, not this tab, so they take the restore path even from
+# inside a pane, which is where they will almost always be typed.
+case " $* " in
+  *" --from "*|*" --list "*) exec herdr_session_restore.py "$@" ;;
+esac
+tab="${HERDR_TAB_ID:-}" show="" force=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -n|--show)             show=1; shift ;;
+    -f|--force)            force=1; shift ;;
+    w[0-9A-Z]*:t[0-9A-Z]*) tab="$1"; shift ;;
+    *) break ;;
+  esac
+done
+# Outside herdr there is no tab to resume, so hr means the other half of the job: put back the sessions
+# that were running when herdr stopped. That list is a RECORDING, written every minute while herdr is up
+# and never while it is down — after a restart every pane is a bare shell and herdr cannot tell which
+# ones were live.
+if [ -z "$tab" ]; then
+  echo "hr: not inside a herdr pane — restoring the sessions that were running when herdr stopped." >&2
+  if [ -n "$show" ]; then exec herdr_session_restore.py --dry-run "$@"; else exec herdr_session_restore.py "$@"; fi
+fi
+# A tab that never held a session is the ordinary case for a tab you just made, not an error.
+if ! out=$(herdr_session_resolve_tab.py "$tab" 2>/dev/null); then
+  echo "hr: no session on record for tab $tab (a new tab has none) — opening the resume picker." >&2
+  exec cr
+fi
+# Tab is IFS whitespace, so a plain tab split would collapse an EMPTY field and shift the labels left,
+# silently disabling the label check below. Split on a non-whitespace separator instead.
+IFS=$'\x1f' read -r uuid _src title was_label now_label <<<"${out//$'\t'/$'\x1f'}"
+# The tab was labeled X when this session was recorded in it, and the tab you are standing in is labeled
+# Y. Either you renamed the tab, which is harmless, or herdr renumbered its tab ids and this record now
+# belongs to a DIFFERENT tab — which would resume the wrong session and look like an ordinary success.
+# Refuse and show both rather than guess. An empty label on either side means no comparison is possible.
+if [ -z "$force" ] && [ -n "$was_label" ] && [ -n "$now_label" ] && [ "$was_label" != "$now_label" ]; then
+  echo "hr: REFUSING — tab $tab is labeled \"$now_label\" now, but this session was recorded in a tab labeled \"$was_label\"." >&2
+  echo "hr: it would resume: ${title:-$uuid}" >&2
+  echo "hr: if you renamed the tab, run  hr --force  to accept it." >&2
+  exit 1
+fi
+# -n is checked AFTER the guard on purpose: a mismatch is exactly what you run hr -n to find out about.
+if [ -n "$show" ]; then printf '%s\t%s\n' "$uuid" "$title"; exit 0; fi
+echo "hr: $tab -> ${title:-$uuid}" >&2
+exec cr "$uuid" "$@"

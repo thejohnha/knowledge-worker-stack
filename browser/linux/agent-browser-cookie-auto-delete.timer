@@ -1,0 +1,8 @@
+# agent-browser-cookie-auto-delete.timer: a sweep every 20 minutes. The schedule only sets how promptly a
+# purge happens; the grace period is wall-clock time and does not change with it.
+[Unit]
+Description=browse cookie auto-delete, every 20 minutes
+[Timer]
+OnCalendar=*:0/20
+[Install]
+WantedBy=timers.target

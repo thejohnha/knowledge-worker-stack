@@ -1,0 +1,10 @@
+[Unit]
+Description=Openbox window manager on :99
+After=xorg99.service
+Requires=xorg99.service
+[Service]
+Environment=DISPLAY=:99
+ExecStart=/usr/bin/openbox
+Restart=always
+[Install]
+WantedBy=multi-user.target

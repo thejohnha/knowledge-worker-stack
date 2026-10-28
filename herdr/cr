@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# cr <uuid> [claude switches...] — resume one Claude Code session, safely.
+#   cr 12345678-90ab-4cde-8f01-23456789abcd
+#   cr 12345678-90ab-4cde-8f01-23456789abcd --model opus     # one-shot for this resume; the last flag wins
+#   cr                                                       # no uuid: Claude Code's own resume picker
+#
+# What it adds over `claude --resume <uuid>`:
+#   - REFUSES a session that is already open in a live process. Two processes appending one
+#     transcript fork it, and one branch silently drops out of the conversation; Claude Code does not
+#     guard this itself.
+#   - Resumes from the directory the session was started in: claude finds a session by its project
+#     folder, so a session started in ~/projects/x is only found from ~/projects/x.
+#   - Resumes on the account the session belongs to (~/.claude/state/state_claude_session_accounts.json,
+#     uuid -> account name; a missing row means "default"), using ~/.config/knowledge-worker-stack/accounts.json.
+#   - Keeps the session's own title (--name) when it has one.
+#   - Starts in --permission-mode auto; set CR_PERMISSION_MODE to another mode, or to empty for
+#     Claude Code's default.
+# Needs the FULL 36-character uuid: a prefix matches no transcript and opens the picker instead.
+case "${1:-}" in -h|--help) awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$0"; exit 0 ;; esac
+uuid="${1:-}"; [ $# -gt 0 ] && shift
+j=""
+[ -n "$uuid" ] && j=$(claude_session_transcript.sh "$uuid" 2>/dev/null)
+if [ -z "$j" ]; then
+  [ -n "$uuid" ] && echo "cr: no session '$uuid' — opening the resume picker instead." >&2
+  exec claude --resume
+fi
+
+# One python pass: is the session already open, which account and config dir, and its custom title.
+# Prints four lines: live pids (space-separated), account, config dir, title.
+info=$(python3 - "$uuid" "$j" <<'PY'
+import glob, json, mmap, os, sys
+uuid, j = sys.argv[1], sys.argv[2]
+home = os.path.expanduser("~")
+try: acc = json.load(open(os.path.join(home, ".config/knowledge-worker-stack/accounts.json")))
+except Exception: acc = {}
+if not isinstance(acc, dict): acc = {}
+dirs = [os.path.join(home, ".claude")] + [os.path.expanduser(v) for v in acc.values() if isinstance(v, str)]
+pids = set()
+for d in dirs:                                       # every live session, fresh or resumed, keyed by sessionId
+    for sf in glob.glob(os.path.join(d, "sessions", "*.json")):
+        try: s = json.load(open(sf))
+        except Exception: continue                   # half-written registry file
+        if isinstance(s, dict) and s.get("sessionId") == uuid and s.get("pid"): pids.add(str(s["pid"]))
+try: side = json.load(open(os.path.join(home, ".claude/state/state_claude_session_accounts.json")))
+except Exception: side = {}
+e = side.get(uuid) if isinstance(side, dict) else None
+name = (e.get("account") if isinstance(e, dict) else e) or "default"
+cdir = os.path.expanduser(acc.get(name) or ("~/.claude" if name == "default" else ""))
+title = ""
+if os.path.getsize(j):
+    with open(j, "rb") as fh, mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+        pos, needle = len(mm), b"\"custom-title\""   # backwards scan: the LAST custom-title wins
+        while True:
+            i = mm.rfind(needle, 0, pos)
+            if i < 0: break
+            s = mm.rfind(b"\n", 0, i) + 1; t = mm.find(b"\n", i)
+            try: d = json.loads(mm[s:t if t >= 0 else len(mm)])
+            except Exception: d = None
+            if isinstance(d, dict) and d.get("type") == "custom-title":
+                title = (d.get("customTitle") or "").replace("\n", " "); break
+            pos = i
+print(" ".join(sorted(pids))); print(name); print(cdir); print(title)
+PY
+) || { echo "cr: cannot check whether $uuid is already open (python3 missing, or the scan failed) — refusing to resume." >&2; exit 1; }
+{ read -r pids; read -r acct; read -r cdir; IFS= read -r title; } <<<"$info"
+
+# A registry entry counts only while its pid is alive AND is a claude process: a crashed holder's
+# pid is dead, and a reused pid belongs to something else.
+for pid in $pids; do
+  if kill -0 "$pid" 2>/dev/null && ps -p "$pid" -o command= 2>/dev/null | grep -qi claude; then
+    echo "cr: session $uuid is already open (PID $pid) — not resuming a second copy (it would corrupt the transcript)." >&2
+    exit 1
+  fi
+done
+
+[ -n "$cdir" ] || { echo "cr: session $uuid belongs to account '$acct', which ~/.config/knowledge-worker-stack/accounts.json does not list." >&2; exit 1; }
+# The account is set EXPLICITLY, default included: a pane set up for another account has exported
+# that account's config dir, and a bare claude there would resume this session on the wrong account.
+if [ "$(cd "$cdir" 2>/dev/null && pwd -P)" = "$(cd "$HOME/.claude" 2>/dev/null && pwd -P)" ]; then unset CLAUDE_CONFIG_DIR
+else export CLAUDE_CONFIG_DIR="$cdir"; fi
+# A token file in the config dir wins; without one the account signs in with its own config dir, and
+# a token inherited from another account must not override that. The token is set on the claude
+# command alone (not exported, never in a process's arguments), so nothing else cr runs sees it.
+tok=""; [ -s "$cdir/.oauth_token" ] && tok=$(cat "$cdir/.oauth_token")
+unset CLAUDE_CODE_OAUTH_TOKEN
+
+scwd=$(claude_session_transcript.sh "$uuid" --cwd 2>/dev/null)
+[ -n "$scwd" ] && [ -d "$scwd" ] && cd "$scwd"
+
+mode=(); [ -n "${CR_PERMISSION_MODE-auto}" ] && mode=(--permission-mode "${CR_PERMISSION_MODE-auto}")
+name=(); [ -n "$title" ] && name=(--name "$title")
+[ -n "$tok" ] && CLAUDE_CODE_OAUTH_TOKEN=$tok exec claude ${mode[@]+"${mode[@]}"} --resume "$uuid" ${name[@]+"${name[@]}"} "$@"
+exec claude ${mode[@]+"${mode[@]}"} --resume "$uuid" ${name[@]+"${name[@]}"} "$@"

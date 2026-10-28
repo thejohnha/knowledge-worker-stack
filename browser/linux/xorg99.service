@@ -1,0 +1,12 @@
+[Unit]
+Description=Xorg dummy display :99 for the agent browser
+[Service]
+# Xorg leaves these behind when it dies uncleanly; without the cleanup Restart=always crash-loops on
+# "Server is already active for display 99". Safe because this unit is the only owner of :99.
+ExecStartPre=-/bin/rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
+ExecStart=/usr/bin/Xorg :99 -config /etc/X11/xorg.conf.d/10-dummy.conf -noreset +extension RANDR +extension RENDER -extension MIT-SHM
+# Readiness gate: systemd calls the unit started before :99 accepts connections, and every consumer races it.
+ExecStartPost=-/usr/bin/timeout 30 /bin/sh -c 'until /usr/bin/xset -display :99 q >/dev/null 2>&1; do sleep 0.2; done'
+Restart=always
+[Install]
+WantedBy=multi-user.target

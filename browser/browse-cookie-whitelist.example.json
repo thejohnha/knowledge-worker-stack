@@ -1,0 +1,11 @@
+{
+ "readme": [
+  "Domains browse-cookie-auto-delete.js never deletes. Copy to browse-cookie-whitelist.json next to it and edit.",
+  "One registrable domain per entry: example.com covers www.example.com and login.example.com.",
+  "Private addresses (192.168.x.x, 10.x.x.x, 172.16-31.x.x, localhost) are protected without being listed."
+ ],
+ "domains": [
+  "example.com",
+  "example.org"
+ ]
+}

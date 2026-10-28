@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+# agent_copy_to_clipboard — put text on the user's macOS clipboard and PROVE it landed.
+#
+# Exists because "it's on your clipboard" is otherwise an unverified claim: a session can say it
+# without pbcopy ever running, or with pbcopy silently losing the payload. This tool copies, reads
+# the clipboard back with pbpaste, and compares what was sent against what came back, byte for byte.
+# Only after that match does it print the six-clipboard-glyph marker line that the user scans for, so
+# the marker is evidence rather than decoration.
+#
+# It also flags non-ASCII bytes in the read-back (em dashes, smart quotes, emoji), which paste as
+# mojibake in some apps. That is a WARNING, never a failure — plenty of clipboard
+# content is legitimately non-ASCII.
+#
+# Text comes from the arguments, or from stdin when there are none. Argument text is copied with no
+# trailing newline; stdin is copied byte-for-byte, trailing newline and all, because the payload is
+# staged in a temp file rather than a command substitution (which would eat trailing newlines).
+#
+# --secret copies and verifies exactly as normal but never echoes the payload, for API tokens and
+# passwords: a printed secret stays in the session transcript for good. It reads stdin only (an
+# argument would sit in the transcript and the process list) and drops one trailing newline, so a
+# piped password pastes without an Enter. The item is marked concealed and transient
+# (nspasteboard.org) and local to this Mac, so clipboard-history apps skip it and Universal Clipboard
+# does not send it to other devices; if that fails it falls back to plain pbcopy with a warning.
+# The marker still prints, so the user's visual scan is unchanged, and the non-ASCII warning
+# degrades to a count because the offending lines ARE the secret.
+set -euo pipefail
+
+MARKER='📋📋📋📋📋📋'
+
+die() { printf 'agent_copy_to_clipboard: %s\n' "$1" >&2; exit "${2:-1}"; }
+
+usage() {
+  cat <<'EOF'
+agent_copy_to_clipboard — copy text to the macOS clipboard, then verify it byte-for-byte.
+
+Usage:
+  agent_copy_to_clipboard "text to copy"          # text from arguments (no trailing newline)
+  printf 'line1\nline2\n' | agent_copy_to_clipboard   # text from stdin (bytes preserved exactly)
+  agent_get_credential 'Entry' | agent_copy_to_clipboard -s   # secret: stdin only, never printed
+  agent_copy_to_clipboard -- -s                   # copy a literal "-s" rather than reading a flag
+  agent_copy_to_clipboard -h | --help
+
+Prints the six-clipboard-glyph marker, the copied text, and a confirmation line. Exits non-zero if
+the read-back does not match, and warns (without failing) when the text contains non-ASCII bytes.
+Under -s | --secret the marker and the confirmation still print; the text never does. -s refuses
+arguments, drops one trailing newline, and hides the item from clipboard-history apps and other devices.
+EOF
+}
+
+SECRET=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -h|--help)   usage; exit 0 ;;
+    -s|--secret) SECRET=1; shift ;;
+    --)          shift; break ;;   # everything after this is text, even if it looks like a flag
+    *)           break ;;
+  esac
+done
+
+command -v pbcopy >/dev/null 2>&1 || die 'pbcopy not found — this is a macOS-only tool'
+command -v pbpaste >/dev/null 2>&1 || die 'pbpaste not found — this is a macOS-only tool'
+
+SENT=$(mktemp -t agent_copy_to_clipboard_sent)
+BACK=$(mktemp -t agent_copy_to_clipboard_back)
+trap 'command rm -f "$SENT" "$BACK"' EXIT
+
+if [ "$SECRET" = 1 ]; then
+  [ "$#" -eq 0 ] || die '--secret reads the text from stdin only; pipe it in, never pass it as an argument'
+  perl -pe 'chomp if eof' >"$SENT"
+elif [ "$#" -gt 0 ]; then
+  printf '%s' "$*" >"$SENT"
+else
+  cat >"$SENT"
+fi
+
+[ -s "$SENT" ] || die 'refusing to copy empty input'
+
+# Concealed + transient tell clipboard-history apps to skip the item; current-host-only keeps it off
+# Universal Clipboard.
+conceal_copy() {
+  osascript -l JavaScript -e '
+    ObjC.import("AppKit");
+    function run(argv) {
+      var s = $.NSString.stringWithContentsOfFileEncodingError(argv[0], $.NSUTF8StringEncoding, null);
+      if (s.isNil()) throw new Error("not UTF-8");
+      var pb = $.NSPasteboard.generalPasteboard;
+      pb.prepareForNewContentsWithOptions($.NSPasteboardContentsCurrentHostOnly);
+      if (!pb.setStringForType(s, "public.utf8-plain-text")) throw new Error("write failed");
+      pb.setStringForType("", "org.nspasteboard.ConcealedType");
+      pb.setStringForType("", "org.nspasteboard.TransientType");
+    }' "$SENT" >/dev/null 2>&1
+}
+
+if [ "$SECRET" = 0 ]; then
+  pbcopy <"$SENT" || die 'pbcopy failed'
+elif ! conceal_copy; then
+  printf 'agent_copy_to_clipboard: could not mark it concealed; copied with pbcopy, so clipboard-history apps may keep it\n' >&2
+  pbcopy <"$SENT" || die 'pbcopy failed'
+fi
+pbpaste >"$BACK"
+
+cmp -s "$SENT" "$BACK" || die 'clipboard read-back does not match — NOT copied'
+
+# Char count, not byte count: an em dash is one character the reader sees, three bytes on disk.
+chars=$(LC_CTYPE=UTF-8 wc -m <"$SENT" | tr -d ' ')
+
+# perl, not `grep -P`: macOS ships BSD grep, which rejects -P outright, and a BSD bracket expression
+# treats \x00 as literal characters instead of a byte range — so both grep forms report "clean" on
+# text that is not. perl reads bytes here (no -C), so the range means exactly what it says.
+nonascii=$(perl -ne 'print "$.:$_" if /[^\x00-\x7F]/' "$BACK") || die 'non-ASCII detector failed'
+if [ -n "$nonascii" ]; then
+  status='WARNING: contains non-ASCII'
+  if [ "$SECRET" = 1 ]; then
+    printf 'agent_copy_to_clipboard: non-ASCII bytes on %s line(s) — lines withheld (--secret)\n' \
+      "$(printf '%s\n' "$nonascii" | wc -l | tr -d ' ')" >&2
+  else
+    printf 'agent_copy_to_clipboard: non-ASCII bytes on these lines (mojibake risk in some apps):\n%s\n' "$nonascii" >&2
+  fi
+else
+  status='ascii-clean'
+fi
+
+printf '%s\n' "$MARKER"
+if [ "$SECRET" = 1 ]; then
+  printf '[secret — copied but not shown]\n'
+else
+  cat "$SENT"
+  [ "$(tail -c 1 "$SENT" | od -An -tu1 | tr -d ' ')" = "10" ] || printf '\n'
+fi
+printf 'copied to clipboard (%s chars, %s)\n' "$chars" "$status"
