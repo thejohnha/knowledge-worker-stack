@@ -7,12 +7,15 @@
                                          or due is at most DAYS from today, overdue included, undated left out.
                                          --done lists the done records instead, oldest first. --json prints every
                                          field plus the period title.
+  priorities.py add title=... [field=value ...]   add a row; prints its id
+  priorities.py set ID field=value ...   change fields; field= clears one; a tier the user set is refused
   priorities.py done ID                  mark row ID done, as d on the screen does: a repeating row leaves its done
                                          record and moves on to the next period
+  priorities.py remove ID                mark row ID removed; it stays on file
 
 The file: ~/.config/knowledge-worker-stack/priorities.json (PRIORITIES_FILE overrides). One JSON object: row ids
 (integer strings, never reused) mapping to rows, plus "_settings": {"next_id": N}. The chief of staff writes the
-rows; the screen changes them only on the user's keys, and re-reads the file just before every save, so a row the
+rows through add, set, done and remove, never by hand; the screen changes them only on the user's keys, and re-reads the file just before every save, so a row the
 chief wrote meanwhile is not lost. Fields, all optional but title, dates as "YYYY-MM-DD":
   title      as shown; a repeating row's period is added on screen, never stored
   due        the outside world's date; leave it out for a row waiting on an event, which sorts last in its tier
@@ -772,26 +775,91 @@ def list_priorities(args):
         print(f"{prefix}  #{rid}  {priority_line(r)}")
     return 0
 
-def done_command(args):
-    """done ID — d without the screen, for the chief: the same close, so a repeating row rolls forward."""
-    if len(args) != 1:
-        print(__doc__)
-        return 2
+def write_command(cmd, args):
+    """add, set, done, remove: the chief's writes, each a re-read, one change and a save, so it never hand-edits."""
     try:
-        row = change_priority(args[0], lambda dl, r: close_priority(dl, args[0], date.today()))
+        if cmd == "add":
+            fields = parse_fields(args)
+            if not fields or not fields.get("title"):
+                return usage("add needs title=...")
+            fields = {k: v for k, v in fields.items() if v != ""}
+            dl = load_priorities()
+            rid = next_id(dl)
+            dl[rid] = dict(fields, created=date.today().isoformat())
+            save(dl)
+            print(f"Added: #{rid} {priority_title(dl[rid])}")
+            return 0
+        if not args:
+            return usage(f"{cmd} needs a row id")
+        rid, rest = args[0], args[1:]
+        if cmd == "set":
+            fields = parse_fields(rest)
+            if not fields:
+                return usage("set needs field=value ...")
+            row = load_priorities().get(rid)
+            if row and "tier" in fields and row.get("tier_by") == "user":
+                print(f"#{rid}: the user set this tier; it changes only with p on the screen.")
+                return 1
+            if fields.get("title") == "":
+                return usage("title cannot be empty")
+            def apply(dl, r):
+                for k, v in fields.items():
+                    if v == "":
+                        r.pop(k, None)
+                    else:
+                        r[k] = v
+            row = change_priority(rid, apply)
+        elif cmd == "done" and not rest:
+            row = change_priority(rid, lambda dl, r: close_priority(dl, rid, date.today()))
+        elif cmd == "remove" and not rest:
+            row = change_priority(rid, lambda dl, r: r.update(removed=date.today().isoformat()))
+        else:
+            return usage()
     except json.JSONDecodeError as e:
         print(f"{PRIORITIES} is corrupt: {e}")
         return 1
     if not row:
         return 1
-    print(f"Done: #{args[0]}" + (f", next due {row['due']}" if not row.get("done") else ""))
+    if cmd == "done":
+        print(f"Done: #{rid}" + (f", next due {row['due']}" if not row.get("done") else ""))
+    else:
+        print(f"{'Updated' if cmd == 'set' else 'Removed'}: #{rid} {priority_title(row)}")
     return 0
+
+SETTABLE = PRIORITY_FIELDS + ("tier",) + RULE_FIELDS
+
+def parse_fields(args):
+    """field=value pairs, checked: known fields only, dates as YYYY-MM-DD, tier 1-4, the rule's numbers as numbers.
+    An empty value (notes=) clears the field. Returns None, after saying why, when any pair is wrong."""
+    out = {}
+    for a in args:
+        k, eq, v = a.partition("=")
+        if not eq or k not in SETTABLE:
+            print(f"Not a field=value pair this list knows: {a}  (fields: {', '.join(SETTABLE)})")
+            return None
+        v = v.strip()
+        if v and k in ("due", "start_by") and not as_date(v):
+            print(f"{k} takes YYYY-MM-DD, not {v}")
+            return None
+        if v and k == "tier":
+            if tier_of({"tier": v}) is None:
+                print(f"tier takes 1-4, not {v}")
+                return None
+            v = tier_of({"tier": v})
+        elif v and k in RULE_FIELDS and k != "repeat" and v.isdigit():
+            v = int(v)
+        out[k] = v
+    return out
+
+def usage(why=""):
+    print((why + "\n\n" if why else "") + __doc__)
+    return 2
 
 def main(argv):
     if len(argv) > 1 and argv[1] == "list":
         return list_priorities(argv[2:])
-    if len(argv) > 1 and argv[1] == "done":
-        return done_command(argv[2:])
+    if len(argv) > 1 and argv[1] in ("add", "set", "done", "remove"):
+        return write_command(argv[1], argv[2:])
     if len(argv) > 1 or not sys.stdin.isatty():
         print(__doc__)
         return 0 if argv[1:] in (["-h"], ["--help"]) else 2
