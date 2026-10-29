@@ -6,6 +6,7 @@ Three pieces that work together on one Mac running Claude Code sessions in [herd
 |:---|:---|
 | Comms manager (`claude_frontdesk.py`) | A session says "wake me when X happens, or at 9 a.m., until this date" and can then stop. A job runs every minute, checks every such request, and when one fires it resumes the session and hands it the news. Requests outlive the session that made them. |
 | Chief of staff | One long-lived Claude Code session that watches the others: what each is waiting on you for, one decision at a time, and an hourly pass that prods stalled sessions. Its standing instructions are [`chief-of-staff.md`](chief-of-staff.md). |
+| [Priorities list](#priorities-list) (`priorities.py`) | The chief of staff's one ranked list of what needs you: every live session and every outside deadline. The chief keeps it, raises things in its order, and sends a morning and an evening note from it. Type `priorities.py` to see it; one key re-ranks a row. |
 | Phone bridge | Text the chief of staff from the Mattermost app; its answer comes back in the same chat. Needs [Mattermost on your Mac](mattermost/). |
 | [Email, texts and the comms router](email-texts-and-router.md) | Optional: watch Gmail, Outlook and iMessage/SMS, and have one router read every new message and tell the chief of staff about asks no session owns and every deadline. |
 
@@ -21,8 +22,8 @@ Alerts (a held message, a check failing) go to Mattermost when it is set up, els
 From this folder:
 ```bash
 mkdir -p ~/bin ~/.claude/hooks
-cp claude_frontdesk.py claude_frontdesk_checks.py mattermost_post.py claude_chief_of_staff_*.py claude_chief_of_staff_*.sh ~/bin/
-chmod 755 ~/bin/claude_frontdesk*.py ~/bin/mattermost_post.py ~/bin/claude_chief_of_staff_*
+cp claude_frontdesk.py claude_frontdesk_checks.py mattermost_post.py priorities.py claude_chief_of_staff_*.py claude_chief_of_staff_*.sh ~/bin/
+chmod 755 ~/bin/claude_frontdesk*.py ~/bin/mattermost_post.py ~/bin/priorities.py ~/bin/claude_chief_of_staff_*
 cp chief-of-staff-nothing-waiting-guard.py watch-use-frontdesk-guard.py ~/.claude/hooks/
 [ -f ~/.claude/chief-of-staff.md ] || cp chief-of-staff.md ~/.claude/
 grep -q 'HOME/bin' ~/.zshrc 2>/dev/null || echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zshrc
@@ -153,6 +154,17 @@ herdr server reload-config
 ```
 - `ctrl+alt+c` lands on the chief of staff's tab, resuming it if stopped.
 
+## Priorities list
+The chief of staff's working order: one ranked list of what needs you. Every live session gets a row, beside the outside world's dates (a renewal, a filing, a bill) that no session owns. Each row has a tier: 1 money, legal, security or a hard date within 3 days; 2 a hard date within 14 days, or blocking other work; 3 useful, no date; 4 finished, waiting for your yes. The chief re-ranks every pass, raises things in the list's order, keeps a tier 1 row at the top of every reply until it is done, and sends a morning note (today's tier 1 and 2) and an evening note (tomorrow's prep) only on days that have some.
+```bash
+priorities.py                  # the list: ↑↓ move, Enter open, p set the tier (the chief keeps yours), d done, z push the start date, r remove, a add, h history, q quit
+priorities.py list 7 --json    # what the chief reads: rows starting or due within 7 days, overdue included
+priorities.py done 12          # what the chief runs on your yes: row 12 done; a repeating row moves on to its next period
+```
+- Installed with the rest of this folder (Install, above). The first row written creates `~/.config/knowledge-worker-stack/priorities.json`; `priorities.py --help` gives its format. Nothing here runs on a schedule: the notes are wake requests the chief arms on the comms manager.
+- A finished or removed row stays on file with its date, so the list is also the record of what was met. A repeating row (weekly, monthly, quarterly, annual) leaves a record of each period done and moves on to the next.
+- The chief is the only session that writes the file. Your keys change it too, and every save re-reads it first, so a row the chief added while the list was open is kept.
+
 ## Phone bridge
 Needs [Mattermost on your Mac](mattermost/) with the bot set up (`--setup` there). Then:
 ```bash
@@ -186,13 +198,13 @@ plutil -lint local.knowledge-worker-stack.claude-chief-of-staff-phone-bridge.pli
 for a in claude-frontdesk claude-chief-of-staff-wake claude-chief-of-staff-phone-bridge; do
   launchctl bootout gui/$(id -u)/local.knowledge-worker-stack.$a 2>/dev/null; rm -f ~/Library/LaunchAgents/local.knowledge-worker-stack.$a.plist
 done
-cd ~/bin && rm -f claude_frontdesk.py claude_frontdesk_checks.py mattermost_post.py claude_chief_of_staff_*
+cd ~/bin && rm -f claude_frontdesk.py claude_frontdesk_checks.py mattermost_post.py priorities.py claude_chief_of_staff_*
 rm -f ~/.claude/hooks/chief-of-staff-nothing-waiting-guard.py ~/.claude/hooks/watch-use-frontdesk-guard.py ~/.config/knowledge-worker-stack/frontdesk_checks.sha256.json
 rm -f ~/.claude/state/state_claude_session_frontdesk_nudged.json*
 rm -r ~/.claude/state/state_claude_frontdesk* ~/.claude/state/state_claude_chief_of_staff_*
 rm -f ~/Library/Logs/knowledge-worker-stack/claude_chief_of_staff_*.log
 ```
-- Then take the Stop and PreToolUse hooks out of `~/.claude/settings.json` and the key out of herdr's config. `~/.claude/chief-of-staff.md` holds your preferences: keep or delete it.
+- Then take the Stop and PreToolUse hooks out of `~/.claude/settings.json` and the key out of herdr's config. `~/.claude/chief-of-staff.md` holds your preferences: keep or delete it. `~/.config/knowledge-worker-stack/priorities.json` is your Priorities list, which `install.sh --uninstall` also keeps: delete it by hand. The chief's note wake requests go with the comms manager's state.
 
 ## Known limits
 - Nothing runs while the Mac sleeps. Each check looks at the current state, so the first run after waking catches up; a timer that came due fires late, once.
@@ -200,5 +212,6 @@ rm -f ~/Library/Logs/knowledge-worker-stack/claude_chief_of_staff_*.log
 - The owed scan reads only sessions live in herdr. A session you quit is out of its view, along with whatever it was still waiting on.
 - The injection checker can be wrong both ways. Woken sessions should run in a permission mode that asks before anything risky.
 - Every model call (the injection checker, the owed scan's Haiku pass) uses your Claude plan's limits.
+- The Priorities list re-reads before each save but takes no lock: a chief edit and your key in the same instant can still lose one of them. Where python3's line editor is libedit (Apple's and Homebrew's both are), a field you edit is not pre-filled: its old text shows above the prompt, Enter keeps it and `-` clears it.
 
-Tested on macOS 26 with Apple's python3, against a throwaway home folder, stand-ins for herdr and `tell`, and a stand-in for Mattermost's API: registering and refusing requests, the pin gate, `new_files`, `timer` and `mattermost_new` requests firing and being delivered, the injection checker holding an event and alerting, alerts posting and their fallback reasons, finding the chief by title (live, and stopped with no title store, through herdr's tab record and the transcript's own title), going to a stopped chief, the owed scan sorting an open ask, the hourly wake's dry run, the Stop hook blocking a stale "nothing new", the watch hook with sample hook input (refused once per session per tool, then let through; ordinary commands, a foreground read and a stopped comms manager left alone), the bridge's `--check` and `--post` into a topic thread, and its logic tests (reply extraction, forwarding, batching, the at-the-Mac hold, threads, the outbox); also, with stand-ins: the bridge ignoring webhook, bot and plugin posts, a new screening code per call with marker look-alikes cut out, the release dialog showing the address behind a display name, `-I` keeping a planted `~/bin` module from replacing the standard library, and the bot setup keeping its password off the command line. Not tested: a live herdr, a real Mattermost server (`--setup`, the bridge's poll loop), `github_comments`, launchd loading the plists, and the go-to key.
+Tested on macOS 26 with Apple's python3, against a throwaway home folder, stand-ins for herdr and `tell`, and a stand-in for Mattermost's API: registering and refusing requests, the pin gate, `new_files`, `timer` and `mattermost_new` requests firing and being delivered, the injection checker holding an event and alerting, alerts posting and their fallback reasons, finding the chief by title (live, and stopped with no title store, through herdr's tab record and the transcript's own title), going to a stopped chief, the owed scan sorting an open ask, the hourly wake's dry run, the Stop hook blocking a stale "nothing new", the watch hook with sample hook input (refused once per session per tool, then let through; ordinary commands, a foreground read and a stopped comms manager left alone), the bridge's `--check` and `--post` into a topic thread, and its logic tests (reply extraction, forwarding, batching, the at-the-Mac hold, threads, the outbox); also, with stand-ins: the bridge ignoring webhook, bot and plugin posts, a new screening code per call with marker look-alikes cut out, the release dialog showing the address behind a display name, `-I` keeping a planted `~/bin` module from replacing the standard library, and the bot setup keeping its password off the command line. The Priorities list, with Apple's python3 and Homebrew's, against a throwaway file: ordering by tier, the arrow keys and scrolling, long titles cut to the terminal, every key on the list and on a row's own screen, the repeat rules, the done history, the read command and its window, the `done` command, empty (null) fields in a hand-written file, a corrupt file left untouched, and a row written by another program while the list was open surviving the next save; the keys also in a real terminal. Not tested: a live herdr, a real Mattermost server (`--setup`, the bridge's poll loop), `github_comments`, launchd loading the plists, the go-to key, and a live chief keeping the Priorities list and sending its notes.

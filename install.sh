@@ -20,7 +20,7 @@
 #   office             Excel workbook tools (xlsx surgery, formula cache)     add with --only
 #   grid               hg and the ctrl+alt+g grid                             default
 #   mattermost         Mattermost on this Mac, under OrbStack                 add with --only
-#   comms              comms manager and chief of staff                       default
+#   comms              comms manager, chief of staff, Priorities list         default
 #   imessage           wake sessions on incoming iMessage/SMS (comms guide)   add with --only (after comms)
 #   phone-bridge       text the chief of staff from the Mattermost app        add with --only (after mattermost)
 #
@@ -30,7 +30,7 @@
 # go to ~/knowledge-worker-stack-backups/uninstall-<time>/, not to oblivion, except saved sign-ins and message texts,
 # which are deleted.
 # Never: prints a secret, runs `claude setup-token`, touches the Keychain, edits crontab, or deletes your
-# data (the vault, the browser machine, Mattermost's messages).
+# data (the vault, the browser machine, Mattermost's messages, the Priorities list).
 set -u
 
 REPO=$(cd "$(dirname "$0")" && pwd)
@@ -860,7 +860,7 @@ c_comms() {
   local c="$REPO/comms" f changed=$CHANGES
   mkd comms 755 "$HOME/bin"
   mkd comms 700 "$HOME/.claude/state"
-  putmany comms "$c" "$HOME/bin" 755 claude_frontdesk.py claude_frontdesk_checks.py mattermost_post.py \
+  putmany comms "$c" "$HOME/bin" 755 claude_frontdesk.py claude_frontdesk_checks.py mattermost_post.py priorities.py \
     $(cd "$c" && ls claude_chief_of_staff_*.py claude_chief_of_staff_*.sh)
   put comms "$c/chief-of-staff-nothing-waiting-guard.py" "$HOME/.claude/hooks/chief-of-staff-nothing-waiting-guard.py" 644
   put comms "$c/watch-use-frontdesk-guard.py" "$HOME/.claude/hooks/watch-use-frontdesk-guard.py" 644
@@ -873,6 +873,7 @@ c_comms() {
       "$HOME/bin/claude_frontdesk.py" pin >/dev/null || warn "pin failed"
     fi
   fi
+  rec comms data "$CFG/priorities.json"   # the Priorities list: the chief writes it, uninstall keeps it
   rec comms secretfile "$HOME/.claude/state/state_claude_frontdesk_router.jsonl" "who wrote to you, and about what"
   rec comms secretdir "$HOME/.claude/state/state_claude_frontdesk" "watchers and the messages they fired on"
   rec comms secretdir "$CFG/outlook" "saved sign-ins"
@@ -1054,7 +1055,7 @@ $a" ;;
       integration) say "  - herdr integration uninstall claude"; [ "$DRY" = 1 ] || herdr integration uninstall claude >/dev/null 2>&1 ;;
       compose) say "  - docker compose down (messages and files kept in Docker's volumes)"; [ "$DRY" = 1 ] || docker compose -f "$a" down ;;
       brew) say "  kept $b (Homebrew): remove with   brew uninstall $a $b   if nothing else uses it" ;;
-      data) say "  kept your data: $(short "$a")${b:+ and $(short "$b")} (delete by hand once backed up)" ;;
+      data) [ -e "$a" ] && say "  kept your data: $(short "$a")${b:+ and $(short "$b")} (delete by hand once backed up)" ;;
       machine) say "  kept the OrbStack machine $a and its logins: delete with   orb delete -f $a" ;;
     esac
   done 3<<EOF
@@ -1105,7 +1106,8 @@ verify() {
           chk "ctrl+alt+g bound in herdr" 'grep -q "ctrl+alt+g" "$HCONF"' ;;
     comms) chk "LaunchAgent local.knowledge-worker-stack.claude-frontdesk loaded" 'loaded local.knowledge-worker-stack.claude-frontdesk'
            chk "LaunchAgent local.knowledge-worker-stack.claude-chief-of-staff-wake loaded" 'loaded local.knowledge-worker-stack.claude-chief-of-staff-wake'
-           chk "claude_frontdesk.py list" '"$HOME/bin/claude_frontdesk.py" list' ;;
+           chk "claude_frontdesk.py list" '"$HOME/bin/claude_frontdesk.py" list'
+           chk "priorities.py list" '"$HOME/bin/priorities.py" list' ;;
     mattermost) chk "Mattermost answers on localhost:8065" 'curl -fs http://localhost:8065/api/v4/system/ping' ;;
     phone-bridge) chk "mattermost_post.py --check" '"$HOME/bin/mattermost_post.py" --check'
                   chk "LaunchAgent phone bridge loaded" 'loaded local.knowledge-worker-stack.claude-chief-of-staff-phone-bridge' ;;
