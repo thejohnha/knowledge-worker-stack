@@ -630,7 +630,7 @@ def exchange(mm, dm, bot_id, text, root=""):
             answer, question = reply_after(path, int(rec))
             if st == "blocked" and question:
                 say((split_tag(answer)[2] + "\n\n" if answer else "") + "The chief is waiting on this question at the Mac "
-                        "(answer by text and I'll pass it on):\n\n" + question)
+                        "and can only be answered there; a text sent meanwhile is held until then:\n\n" + question)
                 return
             if answer:
                 if already_pushed(answer, bot_posts_since(mm, dm, bot_id, t0ms)):
