@@ -44,10 +44,10 @@ session_files() { local d; config_dirs | sort -u | while IFS= read -r d; do ls "
 # The account tag in the sidecar (mkdir lock, jq, mv; default = entry absent). Called by the detached half
 # only once the session has quit, so a restart that never happens leaves no tag behind.
 tag_account() {   # uses $u $acct; rc 1 + message on failure
-  local store=~/.claude/state/state_claude_session_accounts.json lock tmp was
+  local store=~/.claude/state/state_claude_session_accounts.json lock tmp was got=
   mkdir -p "$(dirname "$store")"; lock="$store.lock"
-  for _ in $(seq 1 50); do mkdir "$lock" 2>/dev/null && break; sleep 0.05; done
-  [[ -d "$lock" ]] || { echo "could not lock $store"; return 1; }
+  for _ in $(seq 1 50); do mkdir "$lock" 2>/dev/null && { got=1; break; }; sleep 0.05; done
+  [[ -n "$got" ]] || { echo "$lock still held by another writer after 2.5s"; return 1; }   # never write, never rmdir, a lock we do not own
   [[ -f "$store" ]] || echo '{}' > "$store"
   tmp=$(mktemp "$store.XXXXXX")
   if [[ "$acct" != default ]]; then jq --arg s "$u" --arg a "$acct" '.[$s]=$a' "$store" > "$tmp"

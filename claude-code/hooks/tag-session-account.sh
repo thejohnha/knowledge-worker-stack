@@ -35,11 +35,12 @@ done < <(jq -r 'if type=="object" then to_entries[] | select(.key!="default" and
 store="$HOME/.claude/state/state_claude_session_accounts.json"
 mkdir -p "$(dirname "$store")"
 lock="$store.lock"
+got=""
 for _ in $(seq 1 50); do
-  if mkdir "$lock" 2>/dev/null; then trap 'rmdir "$lock" 2>/dev/null || true' EXIT; break; fi
+  if mkdir "$lock" 2>/dev/null; then got=1; trap 'rmdir "$lock" 2>/dev/null || true' EXIT; break; fi
   sleep 0.05
 done
-[ -d "$lock" ] || exit 0
+[ -n "$got" ] || { echo "tag-session-account: $lock still held by another writer; $sid not tagged" >&2; exit 0; }   # never write without owning the lock
 [ -f "$store" ] || echo '{}' > "$store"
 
 # One line at the top of the store so a person opening it knows what it is, re-seeded on every write. The no-op

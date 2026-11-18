@@ -45,11 +45,12 @@ label=$("$resolver" --live-label "$tab" 2>/dev/null || true)
 store="${HERDR_TAB_STORE:-$HOME/.claude/state/state_claude_session_herdr_tabs.json}"
 mkdir -p "$(dirname "$store")"
 lock="$store.lock"
+got=""
 for _ in $(seq 1 50); do
-  if mkdir "$lock" 2>/dev/null; then trap 'rmdir "$lock" 2>/dev/null || true' EXIT; break; fi
+  if mkdir "$lock" 2>/dev/null; then got=1; trap 'rmdir "$lock" 2>/dev/null || true' EXIT; break; fi
   sleep 0.05
 done
-[ -d "$lock" ] || exit 0
+[ -n "$got" ] || { echo "record-herdr-tab: $lock still held by another writer; $tab not recorded" >&2; exit 0; }   # never write without owning the lock
 [ -f "$store" ] || echo '{}' > "$store"
 
 readme="Which Claude Code session each herdr TAB last held, so a tab whose session is no longer running can still be resumed. Keys are herdr public tab ids such as wA:t2F; the value carries the session uuid and where it was seen. herdr itself forgets this shortly after an agent exits, which is why the file exists. Written by the SessionStart hook record-herdr-tab.sh at session start, and every minute by herdr_session_record_live.sh for any tab whose session has since moved to another workspace. Read by hr, which resumes the calling tab's own session. Safe to delete: live tabs refill it as their sessions restart, and the hourly herdr_session_snapshot.sh backup (the tabstore family) holds the rest."
