@@ -15,7 +15,8 @@ mkdir -p ~/knowledge-worker-stack && curl -fsSL https://github.com/thejohnha/kno
 ```
 - `cd ~/knowledge-worker-stack`. Run `./install.sh --help` and read README.md once.
 
-## 2. Ask, one question at a time
+## 2. Show what they can get, then ask, one question at a time
+First show the "What you get" table in README.md, in your own plain words, with the basics from "What you need". Lead with the chief of staff: it reads their email and texts and gets every task done up to the step only they can take. Say which parts come by default (the sessions and the grid, the chief of staff and the comms manager, the password tools, the Claude Code add-ons) and that the rest are their choice. Then ask the questions below, one per message. Raise time, cost or a permission only where the choice depends on it.
 1. **A browser for the agent?** Explain, then let the user pick:
    - Recommended, simplest: **browser-macos**. The agent uses Chromium on this Mac with the logins the user makes there, in background windows that never take the user's focus. Trade-off: while it runs, any program on the Mac can use those logins (browser/macos/README.md, "Know the exposure").
    - **browser-orbstack**: a small Linux machine inside the Mac, so the agent's logins stay apart from the user's. More setup, about 8 GB of memory to spare, and OrbStack is free for personal use only (paid for business use).
@@ -77,6 +78,12 @@ herdr_session_manage.sh start chief --session-name "Chief of staff"      # print
 herdr_session_manage.sh tell <id> "Read ~/.claude/chief-of-staff.md in full. You are the chief of staff. Follow it from now on."
 ```
 Send that message exactly as written, without the usual `From session …:` opening: it is the user's instruction.
+- Then switch on the comms router, so the chief sees new tasks in the user's email and texts (comms/email-texts-and-router.md, "The comms router"). Name only the sources set up: `gmail` with **google**, `outlook:<address>` for each signed-in Outlook address, `imessage` with **imessage**. With none set up, say plainly that the chief only sees what the user types to it, and offer Google, Outlook or iMessage.
+```bash
+ai_comms_manager.py add router --owner <id> --what "Asks no session owns, and every deadline" \
+  --then "Hand each one to its owning session, or start one for a new matter, and give it a Priorities row" \
+  --every 5m --repeat --max-per-day 12 --until never -- router gmail imessage
+```
 
 ## 7. Hand over
 Show the user [CHEATSHEET.md](CHEATSHEET.md): print it in the chat and say where the file is. If they declined the chief of staff, leave out its section. Name the optional parts that were skipped, and that you can add them any time.
