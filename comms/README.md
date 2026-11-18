@@ -22,8 +22,8 @@ Alerts (a held message, a check failing) go to Mattermost when it is set up, els
 From this folder:
 ```bash
 mkdir -p ~/bin ~/.claude/hooks
-cp ai_comms_manager.py ai_comms_manager_checks.py mattermost_post.py priorities.py claude_chief_of_staff_*.py claude_chief_of_staff_*.sh ~/bin/
-chmod 755 ~/bin/ai_comms_manager*.py ~/bin/mattermost_post.py ~/bin/priorities.py ~/bin/claude_chief_of_staff_*
+cp ai_comms_manager.py ai_comms_manager_checks.py mattermost_post.py priorities.py claude_fleet_digest.py claude_chief_of_staff_*.py claude_chief_of_staff_*.sh ~/bin/
+chmod 755 ~/bin/ai_comms_manager*.py ~/bin/mattermost_post.py ~/bin/priorities.py ~/bin/claude_fleet_digest.py ~/bin/claude_chief_of_staff_*
 cp chief-of-staff-nothing-waiting-guard.py watch-use-comms-manager-guard.py ~/.claude/hooks/
 [ -f ~/.claude/chief-of-staff.md ] || cp chief-of-staff.md ~/.claude/
 grep -q 'HOME/bin' ~/.zshrc 2>/dev/null || echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zshrc
@@ -208,7 +208,7 @@ plutil -lint local.knowledge-worker-stack.claude-chief-of-staff-phone-bridge.pli
 for a in ai-comms-manager claude-chief-of-staff-wake claude-chief-of-staff-phone-bridge; do
   launchctl bootout gui/$(id -u)/local.knowledge-worker-stack.$a 2>/dev/null; rm -f ~/Library/LaunchAgents/local.knowledge-worker-stack.$a.plist
 done
-cd ~/bin && rm -f ai_comms_manager.py ai_comms_manager_checks.py mattermost_post.py priorities.py claude_chief_of_staff_*
+cd ~/bin && rm -f ai_comms_manager.py ai_comms_manager_checks.py mattermost_post.py priorities.py claude_fleet_digest.py claude_chief_of_staff_*
 rm -f ~/.claude/hooks/chief-of-staff-nothing-waiting-guard.py ~/.claude/hooks/watch-use-comms-manager-guard.py ~/.config/knowledge-worker-stack/comms_manager_checks.sha256.json
 rm -f ~/.claude/state/state_ai_comms_manager_guard_nudged.json*
 rm -r ~/.claude/state/state_ai_comms_manager* ~/.claude/state/state_claude_chief_of_staff_*
