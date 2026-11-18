@@ -18,6 +18,9 @@
 # different quoting rules, and selectors and JS snippets are full of quotes. So the vector travels as
 # ONE base64 JSON array and is decoded on the far side. Nothing in an argument can be interpreted by
 # anything in between, which is the only way this survives contact with a CSS selector.
+# The PowerShell itself goes as -EncodedCommand (UTF-16LE base64) for the same reason: when the ssh server's
+# login shell on Windows is PowerShell, a plain -Command string gets its $variables expanded by that OUTER
+# shell before the inner powershell ever sees them.
 set -euo pipefail
 
 : "${BROWSE_WINDOWS_HOST:=agent-browser-windows}"   # the box: an ssh config Host entry (see README.md), not a bare address
@@ -28,8 +31,9 @@ sid="${BROWSE_SESSION:-${CLAUDE_CODE_SESSION_ID:-}}"
 argv_b64=$(python3 -c 'import base64,json,sys; sys.stdout.write(base64.b64encode(json.dumps(sys.argv[1:]).encode()).decode())' "$@")
 sid_b64=$(printf '%s' "$sid" | base64 | tr -d '\n')
 
-exec ssh "$BROWSE_WINDOWS_HOST" \
-  "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"\$s='$sid_b64'; \$a='$argv_b64'; \
-   \$env:BROWSE_SESSION=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(\$s)); \
-   \$argv=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(\$a)) | ConvertFrom-Json; \
-   & '$BROWSE_WINDOWS_HOME\\browse.ps1' @argv; exit \$LASTEXITCODE\""
+ps="\$ProgressPreference='SilentlyContinue'; \$env:BROWSE_SESSION=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$sid_b64')); \
+\$argv=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$argv_b64')) | ConvertFrom-Json; \
+& '$BROWSE_WINDOWS_HOME\\browse.ps1' @argv; exit \$LASTEXITCODE"
+enc=$(printf '%s' "$ps" | iconv -f UTF-8 -t UTF-16LE | base64 | tr -d '\n')
+
+exec ssh "$BROWSE_WINDOWS_HOST" "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $enc"

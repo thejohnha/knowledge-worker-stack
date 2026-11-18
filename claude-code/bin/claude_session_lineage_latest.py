@@ -7,7 +7,8 @@ Exit 0 with the line, exit 1 when the uuid is unknown to both state files.
 A lineage is every session whose title, past or present, reads "<stem> <number>" for the same stem.
 Titles come from the `chain` field of state_claude_session_title_lineage.json (kept by /retitle, so a
 retitle does not split the lineage) plus `cached_custom`, `last_written` and `cached_ai` in
-state_claude_session_titles.json (the title hook's record; a /successor title lands in cached_custom).
+state_claude_session_titles.json (the title hook's record; a /successor title lands in cached_custom),
+plus, for the asked-for session only, the newest title in its own transcript.
 The date prefix and the priority/finished marker are not part of the stem.
 
 Rules:
@@ -18,11 +19,13 @@ Rules:
 - `closed` is read off the chosen member. `close` marks every generation, so a closed top member
   means the whole lineage is finished.
 """
-import json, os, re, sys
+import glob, json, os, re, sys
 
 STATE = os.path.expanduser(os.environ.get("CLAUDE_STATE_DIR", "~/.claude/state"))
 LINEAGE = os.path.join(STATE, "state_claude_session_title_lineage.json")
 TITLES = os.path.join(STATE, "state_claude_session_titles.json")
+PROJECTS = os.path.expanduser(os.environ.get("CLAUDE_PROJECTS_DIR", "~/.claude/projects"))
+TAIL_BYTES = 256 << 10
 
 MARKER = re.compile(r"^(?:\d{8}\s+)?(?:(?:⭐|☑️|[1-9]️⃣)\s+)?")
 NUMBERED = re.compile(r"^(.*\S)\s+(\d{1,3})$")
@@ -52,6 +55,21 @@ def titles_of(uuid, lineage, titles):
     return [c for c in (clean(x) for x in out) if c]
 
 
+def transcript_title(uuid):
+    """The newest custom-title in uuid's own transcript tail, or "". A dormant predecessor's "… 01" title
+    is appended only there by its successor; nothing copies it into the state files."""
+    for path in glob.glob(os.path.join(PROJECTS, "*", uuid + ".jsonl")):
+        try:
+            with open(path, "rb") as fh:
+                fh.seek(max(0, os.path.getsize(path) - TAIL_BYTES))
+                found = re.findall(rb'"customTitle":\s*"((?:[^"\\]|\\.)*)"', fh.read())
+            if found:
+                return clean(json.loads(b'"' + found[-1] + b'"'))
+        except (OSError, ValueError):
+            continue
+    return ""
+
+
 def split(title):
     m = NUMBERED.match(title)
     return (m.group(1).casefold(), int(m.group(2))) if m else (None, None)
@@ -64,6 +82,9 @@ def main():
     me = sys.argv[1]
     lineage, titles = load(LINEAGE), load(TITLES)
     mine = titles_of(me, lineage, titles)
+    t = transcript_title(me)
+    if t:
+        mine.append(t)
     if not mine and me not in lineage and me not in titles:
         return 1
 

@@ -200,7 +200,11 @@ def _row_cells(xml, rownum):
     return out
 
 def replace_row(path, sheet_name, rownum, values, refrow, ncols, sst_reuse=True):
-    """values: list of ncols cells (None / number / str / datetime / Formula)."""
+    """values: list of ncols cells (None / number / str / datetime / Formula).
+
+    A cell that already exists in the row KEEPS ITS OWN style; refrow styles only the cells
+    this call creates. Check fill and number format afterwards on a row that was not empty.
+    """
     tmp = path + ".newtmp"
     with zipfile.ZipFile(path) as z:
         sp = sheet_path(z, sheet_name)
@@ -251,6 +255,7 @@ def set_cells(path, sheet_name, cells, style_from_col=None, style_from_row=None)
     style_from_col: column INDEX in the SAME row to copy a missing cell's style from.
     style_from_row: row NUMBER to copy the SAME column's style from — what a new row
     written into a sparse gap needs, since it has no neighbors of its own.
+    Both apply only to cells this call creates: an EXISTING cell keeps its own style.
     """
     tmp = path + ".newtmp"
     with zipfile.ZipFile(path) as z:

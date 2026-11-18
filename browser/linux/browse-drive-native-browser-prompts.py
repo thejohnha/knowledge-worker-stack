@@ -260,6 +260,15 @@ def prompts(node, depth=0, found=None, seen=None):
             continue
         role = c.get_role_name()
         if role in PROMPT_ROLES or (depth >= 1 and role in NESTED_PROMPT_ROLES):
+            # Chrome 157 hangs the Autofill `list box` inside a nameless nested `frame` of its own. Reporting that
+            # frame as well listed every saved row twice, and `choose` refused each pick as ambiguous. A nested
+            # frame that holds a real prompt is a wrapper: report what it holds. One that holds none (Print
+            # preview) is the prompt.
+            if role in NESTED_PROMPT_ROLES:
+                inner = prompts(c, depth + 1, [], seen)
+                if inner:
+                    found.extend(inner)
+                    continue
             key = (role, c.get_name(), extents(c))
             if key not in seen:
                 seen.add(key)
