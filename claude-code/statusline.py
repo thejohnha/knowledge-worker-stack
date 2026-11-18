@@ -142,6 +142,7 @@ try:
         if tp:
             sz = os.path.getsize(tp)
             num = f"{sz/1048576:.0f}MB" if sz >= 1048576 else f"{sz/1048576:.1f}MB".lstrip("0")
+            if num == ".0MB": num = "<.1MB"   # under 0.05 MB rounds to nothing
             size_disp = f"{BLUE}{num}{RESET}"
     except Exception:
         pass
