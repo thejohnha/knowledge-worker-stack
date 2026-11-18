@@ -9,7 +9,8 @@ The check kinds behind claude_frontdesk.py (comms/README.md). One file so the ru
                                              The bot must be a member of the channel. The bot's own posts
                                              never count.
   github_comments <owner/repo> <issue[,issue...]> <own login>   a new comment on those public issues by
-                                             anyone but <own login>; read from GitHub's API with no token
+                                             anyone but <own login>; read from GitHub's API with no token.
+                                             d<N> = discussion N: any new comment, read from its page
   new_files <abs dir> <pattern[,pattern...]>   a new file in that local folder (top level) whose name
                                              matches a shell pattern, e.g. a download or an export landing
   gmail_new <gmail search query>             a new Gmail message matching the query (gws from ../google/, read-only)
@@ -114,12 +115,13 @@ def mattermost(args, mode, seen_dir):
 
 
 # ------------------------------------------------------------------ github_comments
-def fetch(url, tries=3):
-    req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json", "User-Agent": "curl/8"})
+def fetch(url, tries=3, page=False):
+    req = urllib.request.Request(url, headers={"Accept": "text/html" if page else "application/vnd.github+json",
+                                               "User-Agent": "curl/8"})
     for i in range(tries):
         try:
             with urllib.request.urlopen(req, timeout=30) as r:
-                return json.load(r)
+                return r.read().decode("utf-8", "replace") if page else json.load(r)
         except OSError:
             if i == tries - 1:
                 raise
@@ -127,11 +129,19 @@ def fetch(url, tries=3):
 
 
 def github(args, mode, seen_dir):
-    if len(args) != 3 or not re.fullmatch(r"[\w.-]+/[\w.-]+", args[0]) or not re.fullmatch(r"\d+(,\d+)*", args[1]):
-        raise ValueError("github_comments takes <owner/repo> <issue[,issue...]> <own login>")
+    if len(args) != 3 or not re.fullmatch(r"[\w.-]+/[\w.-]+", args[0]) or not re.fullmatch(r"d?\d+(,d?\d+)*", args[1]):
+        raise ValueError("github_comments takes <owner/repo> <issue[,issue...]> <own login> (d<N> = discussion N)")
     repo, issues, me = args
     comments = []
     for n in issues.split(","):
+        if n.startswith("d"):                      # a discussion: no tokenless API, so its page; ids only, the reader opens it
+            html = fetch("https://github.com/%s/discussions/%s" % (repo, n[1:]), page=True)
+            if not re.search(r"\d+ comments?\b", html):
+                raise OSError("discussion %s: page without a comment count (blocked or changed)" % n[1:])
+            for cid in sorted(set(re.findall(r"discussioncomment-(\d+)", html))):
+                comments.append({"id": "d" + cid, "issue": n, "by": "(open the page)", "at": "", "body": "",
+                                 "url": "https://github.com/%s/discussions/%s#discussioncomment-%s" % (repo, n[1:], cid)})
+            continue
         for c in fetch("https://api.github.com/repos/%s/issues/%s/comments?per_page=100" % (repo, n)):
             comments.append({"id": str(c["id"]), "issue": n, "by": c["user"]["login"], "at": c["created_at"],
                              "url": c["html_url"], "body": c["body"] or ""})

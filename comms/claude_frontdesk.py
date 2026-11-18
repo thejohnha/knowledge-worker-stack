@@ -137,12 +137,13 @@ def span(s):
     return int(m.group(1)) * {"m": 60, "h": 3600, "d": 86400}[m.group(2)]
 
 
-def until_epoch(s):
+def until_epoch(s, base=None):
+    """A span counts from base: the --at time for a one-shot timer, else now."""
     if s == "never":
         return None
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
         return time.mktime(time.strptime(s + " 23:59:59", "%Y-%m-%d %H:%M:%S"))
-    return time.time() + span(s)
+    return (base or time.time()) + span(s)
 
 
 def reg_path(name):
@@ -255,7 +256,9 @@ def cmd_add(a):
     every = span(a.every) if a.every else None
     if every is not None and every < 60:
         sys.exit("--every is at least 1m")
-    until = until_epoch(a.until)
+    until = until_epoch(a.until, at if a.at else None)
+    if a.at and until is not None and until <= at:      # it would disarm as expired before it ever fired
+        sys.exit("--until ends before --at; give a span (it counts from --at), a later date, or never")
     name = owner[:8] + "-" + a.description
     if os.path.exists(reg_path(name)):
         sys.exit("already armed: " + name)
@@ -881,6 +884,8 @@ def cmd_deliver(a):
             t = subprocess.run([TELL, "tell", target, msg] + exact + ["--no-resume", "--timeout", str(TELL_TIMEOUT_MS)],
                                capture_output=True, text=True, timeout=TELL_TIMEOUT_MS / 1000 + 120)
             rc, why = t.returncode, (t.stderr or t.stdout).strip()[-200:]
+            if rc != 0 and "did not arrive intact" in (t.stderr or ""):
+                rc = 3                              # it arrived, altered: unconfirmed, never resent blind
             got = re.search(r"\buuid=([0-9a-f-]{36})", t.stdout + t.stderr)
             if got:
                 target = got.group(1)                     # where it really landed, for the transcript proof
