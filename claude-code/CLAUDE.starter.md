@@ -27,7 +27,7 @@
 - To show the user a file or page, open it yourself (`open <path or URL>`).
 
 # Files you create, change or delete
-- Report every one in the same reply, as a short tree: path, one-line reason, kept or temporary. Include package installs and removals. Leave out temp files.
+- Report every one in the same reply, as a tree per machine with the machine's name at the root: one line per file or folder, dots to one lined-up comment column, a plain-words note on what was done to it and whether it is kept or temporary. Include package installs and removals, and changes to Claude's own settings. Leave out temp files. Repeat the list at the end of every later reply until the user acknowledges it, and drop an entry as soon as they name it.
 - Temp files go in `${TMPDIR:-/tmp}`, named `claude-<YYYYMMDD>-<first 8 characters of the session id>-<topic>-<name>`, so each one traces back to the session that made it. macOS clears files there after a few days unused; move anything worth keeping somewhere permanent the same day. Delete your temp files when you are done.
 - Create only the files the task needs. Name every file so its subject is clear from the name alone.
 - Delete the user's files with `trash <path>` (recoverable), never `rm`. To confirm, ask Finder: `osascript -e 'tell application "Finder" to get name of items of trash'`; `ls ~/.Trash` reads empty without Full Disk Access.
