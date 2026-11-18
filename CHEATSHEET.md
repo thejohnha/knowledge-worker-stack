@@ -7,6 +7,8 @@
 
 To leave, press ctrl+b, then q. Everything keeps running. Type `h` again to come back.
 
+Leaving the Mac with the lid closed: if keep-awake is installed, type `zz` in Terminal first, so your sessions keep working while you are away. Type `zzz` before you put the Mac in a bag.
+
 ## Moving around in herdr
 ctrl+b is the "prefix": press ctrl+b, let go, then press the next key. You can also just click tabs, panes and the sidebar.
 

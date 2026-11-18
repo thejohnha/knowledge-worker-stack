@@ -1,0 +1,29 @@
+#!/bin/sh
+# zz: keep this Mac awake, with the lid closed too (the screen still turns off). zzz: normal sleep again.
+# Blocks all system sleep with `pmset -a disablesleep 1`. That flag does not survive a restart, so zz also
+# leaves a marker file, and keep_awake_watchdog.sh puts the block back whenever the marker exists and the
+# flag is off. Nothing turns sleep back on by itself, not even a low battery: run zzz before you pack the Mac.
+# Without a password only if the sudo rule in keep-awake/README.md (step 2) is installed; otherwise sudo asks.
+case "${1:-on}" in
+  on) v=1 ;;
+  off) v=0 ;;
+  *) echo "usage: zz        keep the Mac awake, lid closed too" >&2
+     echo "       zzz       normal sleep again (same as: zz off)" >&2; exit 2 ;;
+esac
+M="$HOME/.config/knowledge-worker-stack/keep-awake"
+had=0; [ -e "$M" ] && had=1 && old=$(cat "$M")
+# The marker first: the pmset write fires the watchdog (it watches the power settings file), which must
+# already see the new choice, or it would undo it.
+if [ "$v" = 1 ]; then mkdir -p "${M%/*}" && : > "$M"; else rm -f "$M"; fi
+if ! sudo -n /usr/bin/pmset -a disablesleep "$v" 2>/dev/null; then
+  echo "No sudo rule for this yet, so sudo asks for your password (to skip that: keep-awake/README.md, step 2)." >&2
+  if ! sudo /usr/bin/pmset -a disablesleep "$v"; then
+    if [ "$had" = 1 ]; then printf '%s' "$old" > "$M"; else rm -f "$M"; fi   # the choice did not take; put the marker back as it was
+    echo "Nothing changed." >&2; exit 1
+  fi
+fi
+if [ "$(pmset -g | awk '/SleepDisabled/{print $2}')" = 1 ]; then
+  echo "Mac: stays awake, even with the lid closed (screen still turns off). zzz for normal sleep."
+else
+  echo "Mac: normal sleep allowed"
+fi

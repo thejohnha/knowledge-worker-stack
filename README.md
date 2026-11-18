@@ -9,7 +9,7 @@ Open Claude Code and say:
 
 > Download github.com/thejohnha/knowledge-worker-stack into ~/knowledge-worker-stack and follow INSTALL.md.
 
-It asks you a few questions (whether the agent gets a browser, whether you want to text your agents from your phone, Google, Excel files, and whether it should see your incoming texts), runs [`install.sh`](install.sh), and then walks you through the few clicks only you can do, one at a time.
+It asks you a few questions (whether the agent gets a browser, whether you want to text your agents from your phone, whether the Mac should stay awake with the lid closed, Google, Excel files, and whether it should see your incoming texts), runs [`install.sh`](install.sh), and then walks you through the few clicks only you can do, one at a time.
 
 - **Try first:** `./install.sh --dry-run` lists every change without making any.
 - **Undo:** `./install.sh --uninstall`, run from this folder (so keep it), moves what it added to `~/knowledge-worker-stack-backups/` and puts back any file it had replaced. It keeps the vault, the chief of staff's Priorities list, Mattermost's messages, the browser's logins, files you changed since, and the apps Homebrew installed (it prints how to remove them). It deletes the saved Outlook sign-in and its copies of your messages; for Google it prints how to sign out.
@@ -35,12 +35,14 @@ Open Terminal, type `h`, press Enter. That is the whole start. [CHEATSHEET.md](C
 | [`google/`](google/) | Claude searches and reads your Gmail, finds files in Drive, reads Sheets and Docs and checks your calendar, through Google's own command-line tool signed in as you. It writes email drafts; you send them. It can also save an email as a PDF. |
 | [`office/`](office/) | Lets Claude change Excel workbooks without losing formulas, stored results, formats or pivot tables, and lists the traps that corrupt a workbook. Optional. |
 | [`comms/`](comms/) | A session can say "wake me when this message arrives" and stop; it is woken when it does. A chief-of-staff session puts every task that reaches it (from you, or from your email and texts) in the hands of a session that does all the reversible work at once, so by the time you look, what waits for you is only the step only you can take: a send, a payment, a signature, a decision. It keeps one ranked list of everything that needs you, with deadlines, and spends effort in that order. Optionally, text the chief of staff from your phone through [Mattermost running on your own Mac](comms/mattermost/); as installed only the Mac reaches it, and opening it to the phone is an extra, untested step. A text from the phone never approves sending, posting, submitting or paying; only you, typing at the Mac, do. |
+| [`keep-awake/`](keep-awake/) | Type `zz` and the Mac stays awake, also with the lid closed, so the chief of staff and your sessions keep working while you are away; `zzz` lets it sleep again. A watchdog puts the setting back after a restart. Optional. |
 
 ## Know the risks
 - **The browser on your Mac.** With the Mac browser setup, any program running as you can drive that browser, with every login in it, and read any file on your Mac through it. Keep it to sites you are comfortable letting Claude use, or choose the separate Linux-machine setup in [`browser/`](browser/).
 - **Work started by an email.** The chief of staff starts a session for a task it finds in your email or texts without asking you, so a stranger's email can get one going and spend your Claude plan's usage. That session is told the task came from outside, treats the sender's words as information, never instructions, and stops before anything leaves the Mac; the chief starts at most 10 such sessions a day. You can tell the chief to ask you first instead.
 - **"skip".** It restarts a session with every permission prompt and safety check turned off, so anything that session reads (a web page, an email) could steer it unchecked. It turns on only when you type the word; Claude has to ask you for it. It stays on for that session, also after a restart; a session handed on with `/successor` does not inherit it. Use it only for trusted work.
 - **Texting from your phone.** Mattermost's traffic is not encrypted. Opened to your Wi-Fi, anyone on that network could read it and pose as you, and the chief of staff acts on what you text it. Reach it only through an encrypted route such as Tailscale (not tested here).
+- **A Mac that cannot sleep.** After `zz`, a closed Mac keeps running, in a bag too, where it can overheat and drain its battery flat; nothing turns sleep back on by itself. Run `zzz` before you pack it. Its optional sudo rule lets any program running as an admin user turn sleep blocking on or off without a password (only those two exact commands).
 - **The vault's key file.** It opens the vault without a password, which is what lets Claude use it unattended. Never put the key file in a folder that syncs to the cloud, and back it up.
 
 ## Installing by hand
@@ -50,7 +52,7 @@ Each folder's README is complete on its own, and `install.sh` does exactly what 
 2. `browser/` (any one setup; `orbstack/` also installs the OrbStack that Mattermost uses)
 3. `herdr/` → `claude-code/` → `herdr/grid/`
 4. `comms/mattermost/` → `comms/`
-5. `google/`, any time after `claude-code/` (its rules load through claude-code's tool-rules hook); `office/`, any time
+5. `google/`, any time after `claude-code/` (its rules load through claude-code's tool-rules hook); `office/`, any time; `keep-awake/`, any time
 
 Scripts go in `~/bin`. Afterwards, open a new terminal and restart Claude Code so both pick up the new `PATH`, hooks and skills.
 

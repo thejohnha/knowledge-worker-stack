@@ -24,18 +24,19 @@
 #   imessage           wake sessions on incoming iMessage/SMS (comms guide)   add with --only (after comms)
 #   phone-bridge       text the chief of staff from the Mattermost app        add with --only (after mattermost)
 #   update-restart     /restart idle sessions after a Claude Code update      add with --only (after herdr)
+#   keep-awake         zz keeps the Mac awake, lid closed too; zzz undoes it  add with --only
 #
 # Safe to run again: anything already in place is left alone. Every file it replaces, and settings.json
 # and ~/.zshrc before any edit, are copied to ~/knowledge-worker-stack-backups/install/<time>/ first. What it adds is
 # listed in ~/.config/knowledge-worker-stack/install-record.tsv, which is all --uninstall ever removes; removed files
 # go to ~/knowledge-worker-stack-backups/uninstall-<time>/, not to oblivion, except saved sign-ins and message texts,
 # which are deleted.
-# Never: prints a secret, runs `claude setup-token`, touches the Keychain, edits crontab, or deletes your
-# data (the vault, the browser machine, Mattermost's messages, the Priorities list).
+# Never: prints a secret, runs sudo, runs `claude setup-token`, touches the Keychain, edits crontab, or deletes
+# your data (the vault, the browser machine, Mattermost's messages, the Priorities list).
 set -u
 
 REPO=$(cd "$(dirname "$0")" && pwd)
-ALL="secret-dialog vault browser-macos browser-orbstack herdr starter-claude-md claude-code model-sync google office grid mattermost comms imessage phone-bridge update-restart"
+ALL="secret-dialog vault browser-macos browser-orbstack herdr starter-claude-md claude-code model-sync google office grid mattermost comms imessage phone-bridge update-restart keep-awake"
 DEFAULT="secret-dialog vault herdr starter-claude-md claude-code grid comms"
 DRY=0 UNINSTALL=0 ONLY="" SKIP=""
 while [ $# -gt 0 ]; do
@@ -1035,6 +1036,29 @@ c_update_restart() {
 </plist>"
 }
 
+# keep-awake: the sudo rule is the user's step; this script never runs sudo.
+KA_MARK="$HOME/.config/knowledge-worker-stack/keep-awake"
+KA_SUDOERS=/etc/sudoers.d/knowledge-worker-stack-keep-awake
+c_keep_awake() {
+  path_line
+  putmany keep-awake "$REPO/keep-awake" "$HOME/bin" 755 zz zzz keep_awake_watchdog.sh
+  rec keep-awake sudoers "$KA_SUDOERS"
+  agent keep-awake local.knowledge-worker-stack.keep-awake-watchdog "$PH
+<plist version=\"1.0\">
+<dict>
+  <key>Label</key><string>local.knowledge-worker-stack.keep-awake-watchdog</string>
+  <key>ProgramArguments</key><array><string>$HOME/bin/keep_awake_watchdog.sh</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>60</integer>
+  <key>WatchPaths</key><array><string>/Library/Preferences/com.apple.PowerManagement.plist</string></array>
+  <key>StandardOutPath</key><string>$HOME/Library/Logs/knowledge-worker-stack/keep_awake_watchdog.log</string>
+  <key>StandardErrorPath</key><string>$HOME/Library/Logs/knowledge-worker-stack/keep_awake_watchdog.log</string>
+</dict>
+</plist>"
+  [ -e "$KA_SUDOERS" ] || human "Keep-awake: zz works now, but asks for your Mac password each time and the watchdog cannot put the block back after a restart. To fix both, paste this into your own Terminal window; it checks the rule with visudo, installs it only if valid, and asks for your password once:   f=\$(mktemp) && printf '%s\\n' 'Cmnd_Alias KWS_KEEP_AWAKE = /usr/bin/pmset -a disablesleep 1, /usr/bin/pmset -a disablesleep 0' '%admin ALL=(root) NOPASSWD: KWS_KEEP_AWAKE' > \"\$f\" && /usr/sbin/visudo -cf \"\$f\" && sudo install -m 440 -o root -g wheel \"\$f\" $KA_SUDOERS; rm -f \"\$f\"   It lets any program running as an admin user turn sleep blocking on or off without a password, and nothing else (keep-awake/README.md)."
+  return 0
+}
+
 # ===================================================================================================
 # Uninstall: undo the record, newest first, for the chosen parts. Shared lines (the ~/bin PATH line)
 # go only when everything is uninstalled.
@@ -1100,6 +1124,7 @@ $a" ;;
       secretdir) [ -d "$a" ] && { say "  - $(short "$a") (${b:-saved sign-ins}: deleted rather than backed up)"; [ "$DRY" = 1 ] || rm -r "$a"; } ;;
       secretfile) [ -e "$a" ] && { say "  - $(short "$a") (${b:-private}: deleted rather than backed up)"; [ "$DRY" = 1 ] || rm -f "$a"; } ;;
       signin) say "  you: run   gws auth logout   then remove the app's access at https://myaccount.google.com/connections" ;;
+      sudoers) [ -e "$a" ] && say "  you: remove the keep-awake sudo rule in your own Terminal:   sudo rm $a" ;;
       line) text_rm "$a" "$b" 0 ;;
       topline) text_rm "$a" "$b" 1 ;;
       block) text_rm "$a" "$(cat "$BLOCKS/$b" 2>/dev/null)" 0; [ "$DRY" = 1 ] || rm -f "$BLOCKS/$b" ;;
@@ -1183,6 +1208,9 @@ verify() {
                   chk "LaunchAgent phone bridge loaded" 'loaded local.knowledge-worker-stack.claude-chief-of-staff-phone-bridge' ;;
     update-restart) chk "LaunchAgent local.knowledge-worker-stack.claude-restart-sessions-after-update loaded" 'loaded local.knowledge-worker-stack.claude-restart-sessions-after-update'
                     chk "claude_restart_sessions_after_update.py --dry-run" '"$HOME/bin/claude_restart_sessions_after_update.py" --dry-run' ;;
+    keep-awake) chk "LaunchAgent local.knowledge-worker-stack.keep-awake-watchdog loaded" 'loaded local.knowledge-worker-stack.keep-awake-watchdog'
+                chk "'zz' and 'zzz' are these scripts, not aliases, in zsh" '[ "$(HOME="$HOME" zsh -ic "whence -w zz zzz" </dev/null 2>/dev/null | tr "\n" " ")" = "zz: command zzz: command " ]'
+                if [ -e "$KA_SUDOERS" ]; then say "  ok   the sudo rule is in place (no password for zz)"; else say "  wait the sudo rule (the step below); until then zz asks for your password"; fi ;;
   esac; done
   if [ -f "$SETTINGS" ]; then
     chk "settings.json is valid JSON" 'python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$SETTINGS"'
@@ -1205,6 +1233,11 @@ for c in cmds:
 
 # ===================================================================================================
 if [ "$UNINSTALL" = 1 ]; then
+  # Removing keep-awake while zz is on would leave a Mac that cannot sleep and no zzz to fix it.
+  if in_sel keep-awake && grep -q "^keep-awake$T" "$REC" 2>/dev/null && [ -e "$KA_MARK" ]; then
+    if [ "$DRY" = 1 ]; then warn "zz is on: the real uninstall stops here until you run zzz"
+    else say "zz is on, so the Mac cannot sleep. Run zzz first, then this again. Nothing was changed."; exit 1; fi
+  fi
   say "Uninstalling:$SEL$([ "$FULL" = 1 ] && echo ' (everything)')$([ "$DRY" = 1 ] && echo ' — dry run, nothing changes')"
   uninstall
   exit 0

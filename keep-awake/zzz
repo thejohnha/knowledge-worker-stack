@@ -1,0 +1,3 @@
+#!/bin/sh
+# zzz: normal sleep again, undoing zz (keep-awake/README.md).
+exec "$(dirname "$0")/zz" off
