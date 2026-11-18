@@ -443,7 +443,7 @@ Also install the task-list hook from piece 5, so the task list survives the rest
 ### Use
 - Each restart prints a log path under `$TMPDIR`; one line per restart also goes to `~/.claude/state/state_claude_session_restarts.log`.
 - If the resume half fails, the log names the one command to paste in that tab: `cr <session id> --dangerously-skip-permissions`.
-- A session that is never idle within 10 minutes is left running, unchanged. An account switch is already recorded by then and applies at the next resume.
+- A session that is never idle within 10 minutes is left running, unchanged. An account switch is recorded only once the session has quit, so a restart that never happens leaves the account as it was.
 - The restart waits while you have unsent text in the input box.
 
 ### Remove it

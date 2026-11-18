@@ -41,6 +41,22 @@ config_dirs() {
 }
 session_files() { local d; config_dirs | sort -u | while IFS= read -r d; do ls "$d"/sessions/*.json 2>/dev/null; done; }
 
+# The account tag in the sidecar (mkdir lock, jq, mv; default = entry absent). Called by the detached half
+# only once the session has quit, so a restart that never happens leaves no tag behind.
+tag_account() {   # uses $u $acct; rc 1 + message on failure
+  local store=~/.claude/state/state_claude_session_accounts.json lock tmp was
+  mkdir -p "$(dirname "$store")"; lock="$store.lock"
+  for _ in $(seq 1 50); do mkdir "$lock" 2>/dev/null && break; sleep 0.05; done
+  [[ -d "$lock" ]] || { echo "could not lock $store"; return 1; }
+  [[ -f "$store" ]] || echo '{}' > "$store"
+  tmp=$(mktemp "$store.XXXXXX")
+  if [[ "$acct" != default ]]; then jq --arg s "$u" --arg a "$acct" '.[$s]=$a' "$store" > "$tmp"
+  else jq --arg s "$u" 'del(.[$s])' "$store" > "$tmp"; fi
+  command mv -f "$tmp" "$store"; rmdir "$lock" 2>/dev/null
+  was=$(jq -r --arg s "$u" '.[$s] // "default"' "$store")   # re-read: proves the write landed
+  [[ "$was" == "$acct" ]] || { echo "sidecar write did not land (reads '$was')"; return 1; }
+}
+
 # ------------------------------------------------------------------ the detached half
 if [[ "$1" == --watch ]]; then
   shift
@@ -82,10 +98,13 @@ if [[ "$1" == --watch ]]; then
     fi
     idle=0; say "not quitting: $out"                       # an unsent draft — the user is typing; wait
   done
-  [[ "$quit" == yes || "$quit" == gone ]] || { say "never idle within the poll budget — left running, nothing changed (the account tag, if any, IS already written and applies on the next resume)"; record never-idle; exit 0; }
+  [[ "$quit" == yes || "$quit" == gone ]] || { say "never idle within the poll budget — left running, nothing changed (no account tag written)"; record never-idle; exit 0; }
 
   for _ in $(seq 1 20); do gone && break; sleep 1; done
   gone || { say "still live 20s after quit — NOT resuming; paste: $fallback"; record quit-failed; exit 1; }
+  if [[ -n "$acct" ]] && ! out=$(tag_account 2>&1); then
+    say "account tag NOT written ($out) — resuming on the unchanged account"; acct=""
+  fi
 
   if [[ "$skip" == yes ]]; then
     # herdr_session_manage.sh resume never starts skip mode (any agent can call it), so this half
@@ -156,9 +175,9 @@ j=$(claude_session_transcript.sh "$u") || exit 2
 pane=$(herdr agent list 2>/dev/null | jq -r --arg u "$u" '.result.agents[]|select(.agent_session.value==$u)|.pane_id' | head -1)
 [[ -n "$pane" ]] || { echo "session $u is not live in any herdr pane — resume it instead: cr $u" >&2; exit 1; }
 
-# Account: validate against accounts.json and the token on disk BEFORE anything is quit, then write the
-# sidecar (mkdir lock, jq, mv; default = entry absent). The SessionStart hook tag-session-account.sh re-tags
-# from the resumed session's transcript path, so the two agree afterwards.
+# Account: validate against accounts.json and the token on disk BEFORE anything is quit. The tag itself is
+# written by the detached half after the quit (tag_account). The SessionStart hook tag-session-account.sh
+# re-tags from the resumed session's transcript path, so the two agree afterwards.
 if [[ -n "$acct" ]]; then
   if [[ "$acct" != default ]]; then
     dir=$(jq -r --arg a "$acct" 'if type=="object" then .[$a] // empty else empty end' ~/.config/knowledge-worker-stack/accounts.json 2>/dev/null)
@@ -166,17 +185,6 @@ if [[ -n "$acct" ]]; then
     dir=${dir/#\~/$HOME}
     [[ -s "$dir/.oauth_token" ]] || { echo "$acct has no token ($dir/.oauth_token) — mint one with claude setup-token" >&2; exit 1; }
   fi
-  store=~/.claude/state/state_claude_session_accounts.json
-  mkdir -p "$(dirname "$store")"; lock="$store.lock"
-  for _ in $(seq 1 50); do mkdir "$lock" 2>/dev/null && break; sleep 0.05; done
-  [[ -d "$lock" ]] || { echo "could not lock $store" >&2; exit 1; }
-  [[ -f "$store" ]] || echo '{}' > "$store"
-  tmp=$(mktemp "$store.XXXXXX")
-  if [[ "$acct" != default ]]; then jq --arg s "$u" --arg a "$acct" '.[$s]=$a' "$store" > "$tmp"
-  else jq --arg s "$u" 'del(.[$s])' "$store" > "$tmp"; fi
-  command mv -f "$tmp" "$store"; rmdir "$lock" 2>/dev/null
-  was=$(jq -r --arg s "$u" '.[$s] // "default"' "$store")   # re-read: proves the write landed
-  [[ "$was" == "$acct" ]] || { echo "sidecar write did not land (reads '$was')" >&2; exit 1; }
 fi
 
 # Keep skip mode if the session already runs in it: the TARGET's live claude process's command line says
