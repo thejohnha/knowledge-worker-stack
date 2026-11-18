@@ -11,7 +11,7 @@ work runs ("Can't restart while work is running in the background"), so a shell 
 Gates, in order — every one must pass:
   1. a claude agent with a session id, agent_status idle or done (never working, never blocked —
      blocked is a permission prompt or question dialog)
-  2. the pane's claude process runs an OLDER version than ~/.local/bin/claude points at
+  2. the pane's claude process runs a DIFFERENT version from the one ~/.local/bin/claude points at
   3. the notice sits on the line directly above the input box's top border (a conversation that
      merely quotes the phrase does not count)
   4. the footer's mode line shows no background work ("· 1 shell", "· 2 monitors", ...)

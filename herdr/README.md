@@ -174,7 +174,7 @@ Merge into `~/.claude/settings.json` (keep existing `PreToolUse` entries):
 When Claude Code updates itself, every running session stays on the old build and shows `✔ Update installed · /restart to apply` above its input box until you type `/restart`. This job types it for you, every 5 minutes, into each session that is safely idle. `/restart` restarts the session in place: same pane, session id, account and permission mode, no model turn, and session-only scheduled jobs survive it. Claude Code refuses it while background work runs, so a shell or Monitor is never killed. The screen is blank for about 15 seconds mid-restart.
 
 A session is restarted only when all of these hold:
-- herdr says idle or done (never working, never blocked on a question or permission prompt), and its pane runs an older version than `~/.local/bin/claude` points at.
+- herdr says idle or done (never working, never blocked on a question or permission prompt), and its pane runs a different version from the one `~/.local/bin/claude` points at.
 - The notice is the line directly above the input box (a conversation that quotes it does not count), and the footer shows no background shells or monitors.
 - Its transcript has not been written for 3 minutes.
 - You are not at it: it is not the focused pane while the Mac has had keyboard or mouse input in the last 10 minutes.
