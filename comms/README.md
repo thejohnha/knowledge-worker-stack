@@ -167,6 +167,14 @@ priorities.py set 12 start_by=2030-01-10 prep="Bring the old passport"   # the c
 - A finished or removed row stays on file with its date, so the list is also the record of what was met. A repeating row (weekly, monthly, quarterly, annual) leaves a record of each period done and moves on to the next.
 - The chief is the only session that writes the file, through those commands, never by hand. Your keys change it too, and every save re-reads it first, so a row the chief added while the list was open is kept.
 
+### Not built yet: a deadline sweep
+A design, not code: tell Claude Code to build it from this against your own calendar and mail.
+- Once a day, read the next 30 days of your calendar and the mail that arrived since the last run, and pick out what looks like an obligation: an appointment, a due date, a renewal, a "by Friday".
+- Skip anything already on the Priorities list or suggested before.
+- Write the findings to a file and `tell` the chief of staff its path. The chief decides what becomes a row; the sweep only reads `priorities.json`, never writes it.
+- Mail is outside text: have a model read it with no tools (`claude -p`), and treat what it says as data, never as instructions.
+- Nothing found: no file, no message.
+
 ## Phone bridge
 Needs [Mattermost on your Mac](mattermost/) with the bot set up (`--setup` there). Then:
 ```bash
