@@ -89,7 +89,7 @@ One watcher that reads every new email and text from the sources you name, once,
 ```bash
 CHIEF=$(claude_chief_of_staff_wake.sh --find)          # the live chief's session id
 ai_comms_manager.py add router --owner "$CHIEF" --what "Asks no session owns, and every deadline" \
-  --then "Tell the user each one in one line: who, what, by when; offer to start a session for a new matter" \
+  --then "Hand each one to its owning session, or start one for a new matter, and give it a Priorities row" \
   --every 5m --repeat --max-per-day 12 --until never -- router gmail outlook:you@company.com imessage
 ```
 - Sources: `gmail`, `outlook:<address>` (one per signed-in address), `imessage`. Name only those you set up.
