@@ -6,6 +6,7 @@ Read this first:
 - **Your phone cannot reach it as installed.** It answers on this Mac only. A VPN such as Tailscale is the way to reach it from the phone (untested). Opening it to the Wi-Fi also works (below, untested), but then anyone on that network can take over your chief of staff.
 - **Nothing works while the Mac sleeps.** Messages you send from the phone wait until it wakes.
 - The server is not backed up unless you do it (below).
+- **Mattermost is the default, not the only way.** Not built yet, and each would reach the phone without Tailscale: the Claude app on your phone (Claude Code's Remote Control), iMessage (the stack already reads it; see [`../email-texts-and-router.md`](../email-texts-and-router.md)), or a Telegram bot. The bridge carries text only; pictures wait for whichever channel comes next.
 
 ## 1. OrbStack
 If you followed the [OrbStack browser guide](../../browser/orbstack/README.md), OrbStack is installed and its ports stay off your network. Otherwise:
