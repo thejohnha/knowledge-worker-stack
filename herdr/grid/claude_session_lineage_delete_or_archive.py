@@ -26,19 +26,26 @@ def key(prompt):
         t.write(b"\n"); return c
 
 def ask_folder(guess):
-    """A line editor with the guess typed in (named in the prompt under libedit, which cannot type it) and Tab
-    completing the existing folders. Empty = cancel."""
+    """A line editor with the guess typed in (under libedit, through the terminal's input queue; named in the
+    prompt if that fails) and Tab completing the existing folders. Empty = cancel."""
     import readline
     if not sys.stdin.isatty(): sys.stdin = open("/dev/tty")
     buckets = g.archive_buckets()
     def comp(text, i):
         m = [b for b in buckets if b.lower().startswith(text.lower())]
         return m[i] if i < len(m) else None
-    libedit = "libedit" in (readline.__doc__ or "")              # macOS's own python: no typed-in guess, so name it
+    libedit = "libedit" in (readline.__doc__ or "")              # macOS's pythons: insert_text from a hook is ignored
     readline.set_completer(comp); readline.set_completer_delims("")
     readline.parse_and_bind("bind ^I rl_complete" if libedit else "tab: complete")
     readline.set_startup_hook(None if libedit else lambda: readline.insert_text(guess))
-    hint = f"suggested: {guess}; " if libedit and guess else ""
+    hint = ""
+    if libedit and guess:   # type the guess into the tty's input queue, echo off; name it in the prompt if that fails
+        old = termios.tcgetattr(sys.stdin); quiet = termios.tcgetattr(sys.stdin); quiet[3] &= ~termios.ECHO
+        termios.tcsetattr(sys.stdin, termios.TCSANOW, quiet)
+        try:
+            for b in guess.encode(): fcntl.ioctl(sys.stdin, termios.TIOCSTI, bytes([b]))
+        except OSError: hint = f"suggested: {guess}; "
+        finally: termios.tcsetattr(sys.stdin, termios.TCSANOW, old)
     try: return input(f"\narchive folder ({hint}Tab completes, empty cancels): ").strip()
     except (EOFError, KeyboardInterrupt): return ""
     finally: readline.set_startup_hook(None)
@@ -101,3 +108,6 @@ if __name__ == "__main__":
     check = "--check" in a[2:]
     msg = main(a[0], a[1], check); print(msg)
     if not check: key("press any key ") if "Refused" in msg else time.sleep(1.2)   # a calling list UI redraws the moment this exits
+    # Non-zero when nothing was done that should have been: a refusal, a missing transcript, a bad folder name or a
+    # failed move. A deliberate cancel and --check passing exit 0.
+    sys.exit(0 if msg.startswith(("deleted", "archived", "aborted", "check only")) and "could not" not in msg else 1)
