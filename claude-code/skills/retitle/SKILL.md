@@ -88,12 +88,18 @@ fi
 body=$(jq -r 'if length==1 then .[0] else ((.[-1] | capture("^(?<d>.*?)(?<n> [0-9]{1,3})?$")) as $m | $m.d + ", originally: " + .[0] + ([.[1:-1][] | ", then: " + .] | join("")) + ($m.n // "")) end' <<<"$chain")
 [[ -n "$cat" ]] && title="$cat $body" || title="$body"
 
+# date prefix — staged as locked_date when the row has none, so the hook applies this same date
+dp=$(jq -r --arg s "$uuid" '.[$s].locked_date // empty' "$state")
+[[ -z "$dp" ]] && dp=$(jq -r 'select(.timestamp)|.timestamp' "$jsonl" 2>/dev/null | head -1 | cut -c1-10 | tr -d -)
+[[ -z "$dp" ]] && dp=$(date -r "$jsonl" +%Y%m%d 2>/dev/null)
+[[ -z "$dp" ]] && dp=$(date +%Y%m%d)
+
 # persist lineage, then stage pending_title (hook prepends date + locks description).
 # BOTH writes take the .lock DIRECTORY — the same mutex date-prefix-title.sh takes on every
 # prompt of every session. See "Locking" below before changing anything here.
-python3 - "$uuid" "$chain" "$cat" "$title" <<'PY'
+python3 - "$uuid" "$chain" "$cat" "$title" "$dp" <<'PY'
 import json, os, sys, tempfile, time
-sid, chain, cat, title = sys.argv[1:5]
+sid, chain, cat, title, dp = sys.argv[1:6]
 
 def rewrite(path, mutate):
     lock = path + ".lock"                                # a DIRECTORY, never a file
@@ -125,6 +131,7 @@ def rewrite(path, mutate):
 def stage(d):
     e = dict(d.get(sid, {}))
     e["pending_title"] = title
+    if not e.get("locked_date"): e["locked_date"] = dp
     e.pop("overridden", None)
     d[sid] = e
 
@@ -132,12 +139,6 @@ h = os.path.expanduser("~/.claude/state")
 rewrite(h + "/state_claude_session_title_lineage.json", lambda d: d.update({sid: dict(d.get(sid) or {}, cat=cat, chain=json.loads(chain))}))   # merge, never replace: the entry may carry fields other writers own
 rewrite(h + "/state_claude_session_titles.json", stage)
 PY
-
-# date prefix — the same one the hook would apply
-dp=$(jq -r --arg s "$uuid" '.[$s].locked_date // empty' "$state")
-[[ -z "$dp" ]] && dp=$(jq -r 'select(.timestamp)|.timestamp' "$jsonl" 2>/dev/null | head -1 | cut -c1-10 | tr -d -)
-[[ -z "$dp" ]] && dp=$(date -r "$jsonl" +%Y%m%d 2>/dev/null)
-[[ -z "$dp" ]] && dp=$(date +%Y%m%d)
 
 # apply now: append the custom-title event the hook would have emitted on the next prompt
 jq -nc --arg t "$dp $title" --arg s "$uuid" '{type:"custom-title",customTitle:$t,sessionId:$s}' >> "$jsonl"
