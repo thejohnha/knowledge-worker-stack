@@ -64,7 +64,7 @@ def main():
     # A resume triggered by an outside event (the comms manager, if installed) stays in auto mode on purpose:
     # nobody is watching, so the classifier must stay on. That waker stamps the target in this file just
     # before it resumes it; a stamp under 15 minutes old means this resume is that wake. No file, no stamps.
-    try: wakes = json.load(open(os.path.expanduser("~/.claude/state/state_claude_frontdesk_wakes.json")))
+    try: wakes = json.load(open(os.path.expanduser("~/.claude/state/state_ai_comms_manager_wakes.json")))
     except (OSError, ValueError): wakes = {}
     if time.time() - (wakes.get(sid) or 0) < GUARD_S:
         log(f"{sid[:8]} was in skip mode, resumed as {now or 'unknown'} by a watcher wake — left in auto mode"); return

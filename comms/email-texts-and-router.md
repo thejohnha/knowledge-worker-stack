@@ -2,7 +2,7 @@
 
 Optional sources for the [comms manager](README.md): wake a session when a Google or Outlook email, or an iMessage or SMS, arrives; and the comms router, which reads every new message once and sends the chief of staff the asks no session owns and every deadline. Each part is separate: set up only the ones you use.
 
-Every message these bring in is outside text. Before any session or the chief sees it, the injection checker reads what the watcher brings in (for an email: sender, subject and the start of the body), and anything that looks like an attempt to make the reader act is held: you get an alert. Mail a session opens itself afterwards, for example with `g read`, is not screened. `claude_frontdesk.py release <name> <n>` asks you in a dialog on this Mac, so a session following its rules cannot release a held message; a session with file access could still edit the watcher's state file. Sessions get the text as a file, never as a typed prompt.
+Every message these bring in is outside text. Before any session or the chief sees it, the injection checker reads what the watcher brings in (for an email: sender, subject and the start of the body), and anything that looks like an attempt to make the reader act is held: you get an alert. Mail a session opens itself afterwards, for example with `g read`, is not screened. `ai_comms_manager.py release <name> <n>` asks you in a dialog on this Mac, so a session following its rules cannot release a held message; a session with file access could still edit the watcher's state file. Sessions get the text as a file, never as a typed prompt.
 
 All access is read-only. Nothing here can send, delete, move or mark a message.
 
@@ -11,7 +11,7 @@ Uses `gws`, installed and signed in by [`../google/`](../google/README.md): one 
 
 Watch for a message (from inside a session):
 ```bash
-claude_frontdesk.py add hotel-reply --what "The hotel's reply about the trip dates" --then "Read it and draft an answer; send nothing" \
+ai_comms_manager.py add hotel-reply --what "The hotel's reply about the trip dates" --then "Read it and draft an answer; send nothing" \
   --every 10m --until 14d -- gmail_new 'from:hotel@example.com dates'
 ```
 - The query is Gmail's own search syntax. What matches when you register never fires; only new matches do. The event names each message's sender, date, subject and the first 1500 characters of its body; the session reads the rest itself with the read tools in [`../google/`](../google/README.md), unscreened.
@@ -23,7 +23,7 @@ Password sign-in for mail programs is gone: Microsoft 365 (work or school) turne
 
 Sign in (the agent runs it; you open the page it prints, type the code, and sign in):
 ```bash
-~/bin/claude_frontdesk_checks.py outlook-login you@outlook.com
+~/bin/ai_comms_manager_checks.py outlook-login you@outlook.com
 ```
 - It prints a code and https://microsoft.com/devicelogin. The code works for 15 minutes.
 - `--tenant consumers` for an Outlook.com, Hotmail or Live address, `--tenant organizations` for a work or school address; the default `common` takes either.
@@ -37,7 +37,7 @@ Sign in (the agent runs it; you open the page it prints, type the code, and sign
 
 Watch for a message (from inside a session):
 ```bash
-claude_frontdesk.py add meeting-time --what "Sam's answer about the meeting time" --then "Tell me it arrived" \
+ai_comms_manager.py add meeting-time --what "Sam's answer about the meeting time" --then "Tell me it arrived" \
   --every 5m --until 7d -- outlook_new you@company.com 'sam meeting'
 ```
 - The second argument is optional: words that must all appear in the sender or subject. Without it, any new inbox message fires.
@@ -60,7 +60,7 @@ cat > ~/Library/LaunchAgents/local.knowledge-worker-stack.imessage-export.plist 
   </array>
   <key>StartInterval</key><integer>60</integer>
   <key>Umask</key><integer>63</integer>
-  <key>StandardOutPath</key><string>$HOME/.claude/state/state_claude_frontdesk_imessage_export.json</string>
+  <key>StandardOutPath</key><string>$HOME/.claude/state/state_ai_comms_manager_imessage_export.json</string>
   <key>StandardErrorPath</key><string>$HOME/Library/Logs/knowledge-worker-stack/imessage-export.log</string>
 </dict></plist>
 EOF
@@ -72,14 +72,14 @@ open "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Pri
 - Then load it and check (the agent does this):
 ```bash
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.knowledge-worker-stack.imessage-export.plist
-sleep 65; ls -l ~/.claude/state/state_claude_frontdesk_imessage_export.json; tail -3 ~/Library/Logs/knowledge-worker-stack/imessage-export.log
+sleep 65; ls -l ~/.claude/state/state_ai_comms_manager_imessage_export.json; tail -3 ~/Library/Logs/knowledge-worker-stack/imessage-export.log
 ```
 - A file with `-rw-------` and an empty log means it works. `authorization denied` or `unable to open database` in the log means the grant is missing.
 - Each minute the query takes the incoming messages among the newest 300 in the database (your own and reactions count toward the 300), and the check drops what it has already seen. Newer macOS stores many messages only in a formatted field; the check extracts the text from it, and shows `[message without text]` where it cannot (a photo, a sticker).
 
 Watch for a text (from inside a session):
 ```bash
-claude_frontdesk.py add plumber-text --what "The plumber's text about Thursday" --then "Tell me what they said; reply nothing" \
+ai_comms_manager.py add plumber-text --what "The plumber's text about Thursday" --then "Tell me what they said; reply nothing" \
   --every 5m --until 7d -- imessage_new '+1 555 123 0001'
 ```
 - The thread is a phone number (any spelling), an email address, a group's name, or `*` for every incoming text.
@@ -88,12 +88,12 @@ claude_frontdesk.py add plumber-text --what "The plumber's text about Thursday" 
 One watcher that reads every new email and text from the sources you name, once, and asks the model (one `claude -p` call per run, no tools) for each message: which watcher's matter it belongs to, whether it asks you for something, a one-line summary, and whether it carries an obligation (a deadline, an amount due, a letter from a regulator or government office, a direct question to you, an appointment). It then sends the chief of staff one message listing every ask no watcher owns and every obligation, each as a summary and where to find it, never the message itself.
 ```bash
 CHIEF=$(claude_chief_of_staff_wake.sh --find)          # the live chief's session id
-claude_frontdesk.py add router --owner "$CHIEF" --what "Asks no session owns, and every deadline" \
+ai_comms_manager.py add router --owner "$CHIEF" --what "Asks no session owns, and every deadline" \
   --then "Tell the user each one in one line: who, what, by when; offer to start a session for a new matter" \
   --every 5m --repeat --max-per-day 12 --until never -- router gmail outlook:you@company.com imessage
 ```
 - Sources: `gmail`, `outlook:<address>` (one per signed-in address), `imessage`. Name only those you set up.
-- **Dry run, the only mode built:** a message the model places with a watcher is only logged; that watcher still delivers it. The router's own message goes to the chief alone. Read `~/.claude/state/state_claude_frontdesk_router.jsonl` (one line per message: where it would go, ask, summary, obligation, why) to see whether its sorting matches yours.
+- **Dry run, the only mode built:** a message the model places with a watcher is only logged; that watcher still delivers it. The router's own message goes to the chief alone. Read `~/.claude/state/state_ai_comms_manager_router.jsonl` (one line per message: where it would go, ask, summary, obligation, why) to see whether its sorting matches yours.
 - Per run it reads at most 8 emails in full and 10 text threads; the rest wait for the next run. The same sender and subject alert once in 3 days. Your own sent mail is skipped.
 - Cost: one Opus call per run that finds new mail, plus the injection checker on its message.
 - A model answer that is not the expected list fails the run: nothing is marked read, and the next run judges the same messages again.
@@ -101,11 +101,11 @@ claude_frontdesk.py add router --owner "$CHIEF" --what "Asks no session owns, an
 ## Remove it
 ```bash
 launchctl bootout gui/$(id -u)/local.knowledge-worker-stack.imessage-export 2>/dev/null
-rm -f ~/Library/LaunchAgents/local.knowledge-worker-stack.imessage-export.plist ~/.claude/state/state_claude_frontdesk_imessage_export.json
-rm -f ~/Library/Logs/knowledge-worker-stack/imessage-export.log ~/.claude/state/state_claude_frontdesk_router.jsonl
+rm -f ~/Library/LaunchAgents/local.knowledge-worker-stack.imessage-export.plist ~/.claude/state/state_ai_comms_manager_imessage_export.json
+rm -f ~/Library/Logs/knowledge-worker-stack/imessage-export.log ~/.claude/state/state_ai_comms_manager_router.jsonl
 rm -r ~/.config/knowledge-worker-stack/outlook
 ```
-- Then switch `/usr/bin/sqlite3` off in Full Disk Access, and remove the Outlook app's access at https://account.live.com/consent/Manage or https://myapps.microsoft.com. Google: see `../google/`. Remove the watchers first with `claude_frontdesk.py rm`.
+- Then switch `/usr/bin/sqlite3` off in Full Disk Access, and remove the Outlook app's access at https://account.live.com/consent/Manage or https://myapps.microsoft.com. Google: see `../google/`. Remove the watchers first with `ai_comms_manager.py rm`.
 
 ## Known limits
 - Nothing is read while the Mac sleeps; the first run after waking catches up (Gmail and Outlook over the last 2 days for the router, 7 for a watcher; iMessage over the newest 300 messages).

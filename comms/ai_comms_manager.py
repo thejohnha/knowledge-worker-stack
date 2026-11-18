@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""claude_frontdesk.py — the comms manager: session wake requests that outlive their session (comms/README.md)
+"""ai_comms_manager.py — the comms manager: session wake requests that outlive their session (comms/README.md)
 
   add <description> --what TEXT --then TEXT (--every 10m | --daily HH:MM | --at 'YYYY-MM-DD HH:MM') --until 14d|YYYY-MM-DD|never
       [--hours HH:MM-HH:MM] [--days mon-fri] [--business-hours] [--repeat] [--max-per-day N] [--owner UUID] -- <kind> <args...>
@@ -18,7 +18,7 @@
 
 Kinds: mattermost_new <channel|@user> [<from user>] · github_comments <owner/repo> <issue[,issue...]> <own login>
        new_files <abs dir> <pattern[,pattern...]> · gmail_new <query> · outlook_new <address> [<words>]
-       imessage_new <thread|*> · router <gmail|outlook:<address>|imessage ...>   (claude_frontdesk_checks.py)
+       imessage_new <thread|*> · router <gmail|outlook:<address>|imessage ...>   (ai_comms_manager_checks.py)
        timer   (no arguments; fires on its own schedule)
 <name> is <sid8>-<description>; any unique suffix of it works.
 """
@@ -29,17 +29,17 @@ BIN = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(BIN)            # after the standard library, so a json.py dropped in ~/bin cannot stand in for it
 import claude_chief_of_staff_find as finder              # transcript paths: one resolver for every comms tool
 STATE = os.path.expanduser(os.environ.get("CLAUDE_STATE_DIR", "~/.claude/state"))
-WDIR = os.path.join(STATE, "state_claude_frontdesk")
+WDIR = os.path.join(STATE, "state_ai_comms_manager")
 EVENTS, LOCKS = os.path.join(WDIR, "events"), os.path.join(WDIR, "locks")
-LOG = os.path.join(STATE, "state_claude_frontdesk.log")
+LOG = os.path.join(STATE, "state_ai_comms_manager.log")
 HEARTBEAT = os.path.join(WDIR, "heartbeat")
 # Read by claude-code's keep-skip-mode-across-resume.py hook: a session stamped here in the last 15 minutes
 # is left in auto mode when resumed, so a wake never brings it back in skip mode.
-WAKES = os.path.join(STATE, "state_claude_frontdesk_wakes.json")
-CHECKS = os.environ.get("WATCH_CHECKS", os.path.join(BIN, "claude_frontdesk_checks.py"))
+WAKES = os.path.join(STATE, "state_ai_comms_manager_wakes.json")
+CHECKS = os.environ.get("WATCH_CHECKS", os.path.join(BIN, "ai_comms_manager_checks.py"))
 # The files a check runs: the gate pins them all, so editing any one of them stops every check.
 PINNED = (CHECKS, os.path.join(BIN, "mattermost_post.py"))
-PIN = os.path.expanduser("~/.config/knowledge-worker-stack/frontdesk_checks.sha256.json")
+PIN = os.path.expanduser("~/.config/knowledge-worker-stack/comms_manager_checks.sha256.json")
 # A .py checks script runs under THIS interpreter, never via its `env python3` shebang, so the runner
 # and its checks always use the same python; -I keeps PYTHON* variables, user site-packages and the
 # script's own folder off its import path. Every python helper the runner starts gets -I.
@@ -277,7 +277,7 @@ def cmd_add(a):
             sys.exit("timer takes no arguments")
     else:
         if not checks_tracked():
-            sys.exit("the checks files changed since `claude_frontdesk.py pin`; review them, pin, then add")
+            sys.exit("the checks files changed since `ai_comms_manager.py pin`; review them, pin, then add")
         r = subprocess.run(CHECKS_ARGV + [kind, "--validate"] + args, capture_output=True, text=True,
                            timeout=CHECK_TIMEOUT)
         if r.returncode != 0:
@@ -536,7 +536,7 @@ def screen(text):
 
 
 def header(name, n):
-    return "From claude_frontdesk.py (not the user): watcher %s, event %s" % (name, n)
+    return "From ai_comms_manager.py (not the user): watcher %s, event %s" % (name, n)
 
 
 def message(r, name, n, path, one_shot):
@@ -549,7 +549,7 @@ def message(r, name, n, path, one_shot):
         body.append("This is a scheduled timer; there is no outside text.")
     body.append('Registered by "%s" (%s). %s' % (title_of(r["owner"]), r["owner"][:8],
                                                  "One-shot, now disarmed." if one_shot else
-                                                 "Still armed: claude_frontdesk.py rm %s to stop it." % name))
+                                                 "Still armed: ai_comms_manager.py rm %s to stop it." % name))
     return "\n".join(body)
 
 
@@ -597,7 +597,7 @@ def screen_event(name, r, st, n):
     notify("Comms manager held a suspicious message (%s #%s)" % (name, n),
            "A watcher fired, and the text it brought in looks like it is trying to make the reader act.\n"
            "No session was woken.\n\nWatcher: %s\nWhat: %s\nOwner: %s\nEvent file: %s\n\n"
-           "To deliver it anyway, tell any session: claude_frontdesk.py release %s %s\n"
+           "To deliver it anyway, tell any session: ai_comms_manager.py release %s %s\n"
            "To drop it, do nothing.\n" % (name, r["what"], title_of(r["owner"]), e["file"], name, n))
 
 
@@ -705,7 +705,7 @@ def cmd_run(_a):
                 if gate is None:
                     gate = checks_tracked()
                 if not gate:
-                    st["last_error"] = "the checks files changed since `claude_frontdesk.py pin`; checks not run"
+                    st["last_error"] = "the checks files changed since `ai_comms_manager.py pin`; checks not run"
                     st["err_since"] = st.get("err_since") or now
                     with Lock("w-" + name):
                         jsave(state_path(name), st)

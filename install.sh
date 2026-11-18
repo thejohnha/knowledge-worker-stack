@@ -856,39 +856,88 @@ export PATH="$HOME/.orbstack/bin:$PATH" DOCKER_HOST="unix://$HOME/.orbstack/run/
   done
 }
 
+# An install from before the comms manager's files were renamed (claude_frontdesk*): retire the old job, files
+# and hook entry, and move its state to the new names so armed watchers and router history carry over.
+FWD='#!/usr/bin/env python3
+# Renamed to watch-use-comms-manager-guard.py; Claude Code sessions started before the rename still run this path.
+import os, runpy; runpy.run_path(os.path.expanduser("~/.claude/hooks/watch-use-comms-manager-guard.py"), run_name="__main__")'
+mig_comms() {
+  local s="$HOME/.claude/state" old=local.knowledge-worker-stack.claude-frontdesk im=local.knowledge-worker-stack.imessage-export
+  local hook="$HOME/.claude/hooks/watch-use-frontdesk-guard.py" o n r imx=0
+  if [ -f "$LA/$old.plist" ] || loaded "$old"; then
+    act "remove the old LaunchAgent $old"
+    [ "$DRY" = 1 ] || { launchctl bootout "gui/$UIDN/$old" 2>/dev/null; bk "$LA/$old.plist"; rm -f "$LA/$old.plist"; }
+  fi
+  if grep -q state_claude_frontdesk "$LA/$im.plist" 2>/dev/null; then
+    imx=1; act "update $(short "$LA/$im.plist") to the new state file name"
+    [ "$DRY" = 1 ] || { launchctl bootout "gui/$UIDN/$im" 2>/dev/null; bk "$LA/$im.plist"; sed -i '' 's/state_claude_frontdesk_/state_ai_comms_manager_/' "$LA/$im.plist"; }
+  fi
+  for o in "$HOME/bin/claude_frontdesk.py" "$HOME/bin/claude_frontdesk_checks.py" "$CFG/frontdesk_checks.sha256.json"; do
+    [ -e "$o" ] || continue
+    act "remove the old $(short "$o") (backed up)"; [ "$DRY" = 1 ] || { bk "$o"; rm -f "$o"; }
+  done
+  # Running sessions keep the hook command they started with, and a missing hook file blocks every Bash call.
+  if [ -f "$hook" ] && [ "$(cat "$hook")" != "$FWD" ]; then
+    act "replace the old $(short "$hook") with a forwarder to the renamed hook (old one backed up)"
+    [ "$DRY" = 1 ] || { bk "$hook"; printf '%s\n' "$FWD" > "$hook"; rec comms state "$hook"; }
+  fi
+  if grep -qF watch-use-frontdesk-guard.py "$SETTINGS" 2>/dev/null; then
+    act "settings.json: remove the old hook watch-use-frontdesk-guard.py"
+    [ "$DRY" = 1 ] || printf 'hook\tPreToolUse\tBash|CronCreate|Monitor\tpython3 "$HOME/.claude/hooks/watch-use-frontdesk-guard.py"\t\n' | settings comms remove >/dev/null
+  fi
+  for o in "$s"/state_claude_frontdesk* "$s"/state_claude_session_frontdesk_nudged.json*; do
+    [ -e "$o" ] || continue
+    n="$s/$(basename "$o" | sed 's/state_claude_session_frontdesk_nudged/state_ai_comms_manager_guard_nudged/; s/state_claude_frontdesk/state_ai_comms_manager/')"
+    if [ -e "$n" ]; then warn "left $(short "$o"): $(short "$n") already exists"; continue; fi
+    act "move $(short "$o") to $(short "$n")"
+    [ "$DRY" = 1 ] && continue
+    mv "$o" "$n"
+    [ -d "$n" ] && for r in "$n"/*.state; do [ -f "$r" ] && sed -i '' 's#/state_claude_frontdesk/#/state_ai_comms_manager/#g' "$r"; done   # event file paths
+  done
+  [ "$imx" = 1 ] && [ "$DRY" = 0 ] && { launchctl bootstrap "gui/$UIDN" "$LA/$im.plist" || warn "could not load $im"; }
+  [ -f "$REC" ] || return 0
+  r=$(awk -F'\t' '/frontdesk/ && $2 ~ /^(file|replaced|agent|setting)$/ {next}
+    {gsub(/state_claude_session_frontdesk_nudged/, "state_ai_comms_manager_guard_nudged"); gsub(/state_claude_frontdesk/, "state_ai_comms_manager"); print}' "$REC")
+  if [ "$r" != "$(cat "$REC")" ]; then
+    act "install record: drop the old names, rename the moved state"
+    [ "$DRY" = 1 ] || { bk "$REC"; printf '%s\n' "$r" > "$REC"; }
+  fi
+}
+
 c_comms() {
   local c="$REPO/comms" f changed=$CHANGES
   mkd comms 755 "$HOME/bin"
   mkd comms 700 "$HOME/.claude/state"
-  putmany comms "$c" "$HOME/bin" 755 claude_frontdesk.py claude_frontdesk_checks.py mattermost_post.py priorities.py \
+  putmany comms "$c" "$HOME/bin" 755 ai_comms_manager.py ai_comms_manager_checks.py mattermost_post.py priorities.py \
     $(cd "$c" && ls claude_chief_of_staff_*.py claude_chief_of_staff_*.sh)
   put comms "$c/chief-of-staff-nothing-waiting-guard.py" "$HOME/.claude/hooks/chief-of-staff-nothing-waiting-guard.py" 644
-  put comms "$c/watch-use-frontdesk-guard.py" "$HOME/.claude/hooks/watch-use-frontdesk-guard.py" 644
+  put comms "$c/watch-use-comms-manager-guard.py" "$HOME/.claude/hooks/watch-use-comms-manager-guard.py" 644
+  mig_comms
   [ -f "$HOME/.claude/chief-of-staff.md" ] || put comms "$c/chief-of-staff.md" "$HOME/.claude/chief-of-staff.md" 644
   path_line
-  if [ "$CHANGES" != "$changed" ] || [ ! -f "$CFG/frontdesk_checks.sha256.json" ]; then
-    act "claude_frontdesk.py pin (records the check files as reviewed)"
+  if [ "$CHANGES" != "$changed" ] || [ ! -f "$CFG/comms_manager_checks.sha256.json" ]; then
+    act "ai_comms_manager.py pin (records the check files as reviewed)"
     if [ "$DRY" = 0 ]; then
-      [ -f "$CFG/frontdesk_checks.sha256.json" ] || rec comms file "$CFG/frontdesk_checks.sha256.json"
-      "$HOME/bin/claude_frontdesk.py" pin >/dev/null || warn "pin failed"
+      [ -f "$CFG/comms_manager_checks.sha256.json" ] || rec comms file "$CFG/comms_manager_checks.sha256.json"
+      "$HOME/bin/ai_comms_manager.py" pin >/dev/null || warn "pin failed"
     fi
   fi
   rec comms data "$CFG/priorities.json"   # the Priorities list: the chief writes it, uninstall keeps it
-  rec comms secretfile "$HOME/.claude/state/state_claude_frontdesk_router.jsonl" "who wrote to you, and about what"
-  rec comms secretdir "$HOME/.claude/state/state_claude_frontdesk" "watchers and the messages they fired on"
+  rec comms secretfile "$HOME/.claude/state/state_ai_comms_manager_router.jsonl" "who wrote to you, and about what"
+  rec comms secretdir "$HOME/.claude/state/state_ai_comms_manager" "watchers and the messages they fired on"
   rec comms secretdir "$CFG/outlook" "saved sign-ins"
-  rec comms state "$HOME/.claude/state/state_claude_session_frontdesk_nudged.json"   # the watch hook's once-per-session memory
+  rec comms state "$HOME/.claude/state/state_ai_comms_manager_guard_nudged.json"   # the watch hook's once-per-session memory
   settings comms add <<EOF
 hook${T}Stop${T}${T}python3 "\$HOME/.claude/hooks/chief-of-staff-nothing-waiting-guard.py"${T}
-hook${T}PreToolUse${T}Bash|CronCreate|Monitor${T}python3 "\$HOME/.claude/hooks/watch-use-frontdesk-guard.py"${T}5
+hook${T}PreToolUse${T}Bash|CronCreate|Monitor${T}python3 "\$HOME/.claude/hooks/watch-use-comms-manager-guard.py"${T}5
 EOF
-  agent comms local.knowledge-worker-stack.claude-frontdesk "$PH
+  agent comms local.knowledge-worker-stack.ai-comms-manager "$PH
 <plist version=\"1.0\"><dict>
-  <key>Label</key><string>local.knowledge-worker-stack.claude-frontdesk</string>
-  <key>ProgramArguments</key><array><string>/usr/bin/python3</string><string>-I</string><string>$HOME/bin/claude_frontdesk.py</string><string>run</string></array>
+  <key>Label</key><string>local.knowledge-worker-stack.ai-comms-manager</string>
+  <key>ProgramArguments</key><array><string>/usr/bin/python3</string><string>-I</string><string>$HOME/bin/ai_comms_manager.py</string><string>run</string></array>
   <key>StartInterval</key><integer>60</integer>
   <key>Umask</key><integer>63</integer>
-  <key>StandardErrorPath</key><string>$HOME/.claude/state/state_claude_frontdesk.log</string>
+  <key>StandardErrorPath</key><string>$HOME/.claude/state/state_ai_comms_manager.log</string>
 </dict></plist>"
   agent comms local.knowledge-worker-stack.claude-chief-of-staff-wake "$PH
 <plist version=\"1.0\"><dict>
@@ -908,13 +957,13 @@ in_sel() { case " $SEL " in *" $1 "*) return 0 ;; esac; return 1; }
 after_comms() {  # after_comms <file comms installs>: a dry run that also installs comms counts it as there
   [ -x "$1" ] || { [ "$DRY" = 1 ] && in_sel comms; } || { warn "install comms first"; return 1; }
 }
-IMX="$HOME/.claude/state/state_claude_frontdesk_imessage_export.json"
+IMX="$HOME/.claude/state/state_ai_comms_manager_imessage_export.json"
 # Working = the export exists and the job's last run exited 0; an empty file is fine (no recent incoming text).
 # launchd creates the file even when sqlite3 is refused, so existence alone does not prove the grant.
 imessage_ok() { [ -e "$IMX" ] && launchctl print "gui/$UIDN/local.knowledge-worker-stack.imessage-export" 2>/dev/null | grep -q 'last exit code = 0'; }
 
 c_imessage() {
-  after_comms "$HOME/bin/claude_frontdesk.py" || return 1
+  after_comms "$HOME/bin/ai_comms_manager.py" || return 1
   mkd imessage 700 "$HOME/.claude/state"
   local first=0; [ -f "$LA/local.knowledge-worker-stack.imessage-export.plist" ] || first=1
   agent imessage local.knowledge-worker-stack.imessage-export "$PH
@@ -927,7 +976,7 @@ c_imessage() {
   </array>
   <key>StartInterval</key><integer>60</integer>
   <key>Umask</key><integer>63</integer>
-  <key>StandardOutPath</key><string>$HOME/.claude/state/state_claude_frontdesk_imessage_export.json</string>
+  <key>StandardOutPath</key><string>$HOME/.claude/state/state_ai_comms_manager_imessage_export.json</string>
   <key>StandardErrorPath</key><string>$HOME/Library/Logs/knowledge-worker-stack/imessage-export.log</string>
 </dict></plist>"
   rec imessage secretfile "$IMX" "your incoming texts"     # after agent(): uninstall deletes it before stashing logs
@@ -1104,9 +1153,9 @@ verify() {
                  chk "statusline.py and the skills in place" '[ -f "$HOME/.claude/statusline.py" ] && [ -f "$HOME/.claude/skills/successor/SKILL.md" ]' ;;
     grid) chk "LaunchAgent local.herdr.grid-ensure loaded" 'loaded local.herdr.grid-ensure'
           chk "ctrl+alt+g bound in herdr" 'grep -q "ctrl+alt+g" "$HCONF"' ;;
-    comms) chk "LaunchAgent local.knowledge-worker-stack.claude-frontdesk loaded" 'loaded local.knowledge-worker-stack.claude-frontdesk'
+    comms) chk "LaunchAgent local.knowledge-worker-stack.ai-comms-manager loaded" 'loaded local.knowledge-worker-stack.ai-comms-manager'
            chk "LaunchAgent local.knowledge-worker-stack.claude-chief-of-staff-wake loaded" 'loaded local.knowledge-worker-stack.claude-chief-of-staff-wake'
-           chk "claude_frontdesk.py list" '"$HOME/bin/claude_frontdesk.py" list'
+           chk "ai_comms_manager.py list" '"$HOME/bin/ai_comms_manager.py" list'
            chk "priorities.py list" '"$HOME/bin/priorities.py" list' ;;
     mattermost) chk "Mattermost answers on localhost:8065" 'curl -fs http://localhost:8065/api/v4/system/ping' ;;
     phone-bridge) chk "mattermost_post.py --check" '"$HOME/bin/mattermost_post.py" --check'

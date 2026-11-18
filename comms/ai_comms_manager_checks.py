@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""claude_frontdesk_checks.py <kind> --validate|--run <args...>
+"""ai_comms_manager_checks.py <kind> --validate|--run <args...>
 
-The check kinds behind claude_frontdesk.py (comms/README.md). One file so the runner's
+The check kinds behind ai_comms_manager.py (comms/README.md). One file so the runner's
 "pinned and unmodified" gate covers every check at once.
 
   mattermost_new <channel|@user> [<from user>]   a new post in that channel of MM_TEAM, or in the bot's
@@ -21,7 +21,7 @@ The check kinds behind claude_frontdesk.py (comms/README.md). One file so the ru
   router <gmail|outlook:<address>|imessage ...>   every new message from those sources judged once by one model
                                              call; fires asks no watcher owns and every obligation (dry run)
 
-  claude_frontdesk_checks.py outlook-login <address> [--headers-only] [--tenant common|consumers|organizations]
+  ai_comms_manager_checks.py outlook-login <address> [--headers-only] [--tenant common|consumers|organizations]
                                              the one-time Outlook sign-in (device code); not a check
 
 --validate   checks the arguments against the live source, prints what they resolve to; exit 0 ok, 2 bad.
@@ -316,7 +316,7 @@ def gmail(args, mode, seen_dir):
 
 
 # ------------------------------------------------------------------ outlook_new: Microsoft mail through Graph
-# Sign-in: the OAuth device code flow, once, by the user (`claude_frontdesk_checks.py outlook-login <address>`),
+# Sign-in: the OAuth device code flow, once, by the user (`ai_comms_manager_checks.py outlook-login <address>`),
 # with Microsoft's own public client "Microsoft Graph Command Line Tools", so nobody registers an app. Scope:
 # Mail.Read (or Mail.ReadBasic, headers only) plus offline_access; read-only either way. The refresh token
 # replaces itself on every use, so the newest one is saved each time, in a mode-600 file, under a lock.
@@ -359,7 +359,7 @@ def ms_token(addr):
     import fcntl
     path = ms_store(addr)
     if not os.path.exists(path):
-        raise ValueError("no Outlook sign-in for %s; run: claude_frontdesk_checks.py outlook-login %s" % (addr, addr))
+        raise ValueError("no Outlook sign-in for %s; run: ai_comms_manager_checks.py outlook-login %s" % (addr, addr))
     with open(path + ".lock", "a") as lk:
         fcntl.flock(lk, fcntl.LOCK_EX)
         d = json.load(open(path))
@@ -439,7 +439,7 @@ def outlook(args, mode, seen_dir):
 def outlook_login(argv):
     """outlook-login <address> [--headers-only] [--tenant common|consumers|organizations]: the one-time sign-in."""
     import argparse
-    ap = argparse.ArgumentParser(prog="claude_frontdesk_checks.py outlook-login")
+    ap = argparse.ArgumentParser(prog="ai_comms_manager_checks.py outlook-login")
     ap.add_argument("address")
     ap.add_argument("--headers-only", action="store_true", help="Mail.ReadBasic: senders and subjects, no bodies")
     ap.add_argument("--tenant", default="common", choices=("common", "consumers", "organizations"))
@@ -485,7 +485,7 @@ def outlook_login(argv):
 # Python launchd job), a launchd job runs /usr/bin/sqlite3 itself, read-only, every minute, and appends the
 # newest incoming messages to EXPORT; only /usr/bin/sqlite3 gets the grant. This check reads EXPORT.
 EXPORT = os.path.expanduser(os.environ.get("WATCH_IMESSAGE_EXPORT",
-                                           "~/.claude/state/state_claude_frontdesk_imessage_export.json"))
+                                           "~/.claude/state/state_ai_comms_manager_imessage_export.json"))
 EXPORT_TRIM = 512 * 1024             # past this size the check empties it; each export repeats the last 300 rows
 
 
@@ -584,7 +584,7 @@ ROUTER_GMAIL_QUERY = "in:inbox -category:promotions -category:social newer_than:
 ROUTER_MAIL, ROUTER_CHATS = 8, 10     # per run: emails read in full, chat threads; the rest wait for the next run
 ROUTER_FOLD = 3 * 86400               # the same sender + subject alerts once in this long (reminders repeat)
 ROUTER_CMD = os.environ.get("WATCH_ROUTER_CMD")    # testing: stands in for the model call
-ROUTER_LOG = os.path.expanduser(os.environ.get("WATCH_ROUTER_LOG", "~/.claude/state/state_claude_frontdesk_router.jsonl"))
+ROUTER_LOG = os.path.expanduser(os.environ.get("WATCH_ROUTER_LOG", "~/.claude/state/state_ai_comms_manager_router.jsonl"))
 ROUTER_SOURCES = ("gmail", "outlook:", "imessage")
 CASE_KINDS = ("gmail_new", "outlook_new", "imessage_new", "mattermost_new")
 
@@ -640,7 +640,7 @@ def router_cases(seen_dir):
         wdir = os.path.dirname(seen_dir.rstrip("/"))
         me = os.path.basename(seen_dir.rstrip("/"))[:-5]
     else:                                                  # under `test`: a temp copy of the seen folder
-        wdir = os.path.expanduser(os.path.join(os.environ.get("CLAUDE_STATE_DIR", "~/.claude/state"), "state_claude_frontdesk"))
+        wdir = os.path.expanduser(os.path.join(os.environ.get("CLAUDE_STATE_DIR", "~/.claude/state"), "state_ai_comms_manager"))
         me = ""
     try:
         titles = json.load(open(os.path.join(os.path.dirname(wdir), "state_claude_session_titles.json")))

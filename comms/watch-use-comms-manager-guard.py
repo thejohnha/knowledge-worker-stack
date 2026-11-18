@@ -3,7 +3,7 @@
 
 WHY THIS EXISTS
 A watch on new mail or messages, or a wake at a set time, belongs to the comms manager
-(claude_frontdesk.py, comms/README.md). The in-session tools all die with the session: CronCreate is
+(ai_comms_manager.py, comms/README.md). The in-session tools all die with the session: CronCreate is
 in-memory and expires after 7 days, Monitor is cut off at 30 minutes, a background loop dies with its
 shell. None of them screens outside text before the model reads it.
 
@@ -22,28 +22,28 @@ FAIL-SOFT: silent when the comms manager is not running on this Mac (heartbeat o
 """
 import fcntl, json, os, re, sys, time
 
-STATE = os.environ.get("FRONTDESK_GUARD_STATE") or os.path.expanduser("~/.claude/state")   # tests: a temp dir
-HEARTBEAT = os.path.join(STATE, "state_claude_frontdesk", "heartbeat")
-SEEN = os.path.join(STATE, "state_claude_session_frontdesk_nudged.json")
-README = ("Which Claude Code sessions watch-use-frontdesk-guard.py has already stopped once, per tool, so "
+STATE = os.environ.get("COMMS_MANAGER_GUARD_STATE") or os.path.expanduser("~/.claude/state")   # tests: a temp dir
+HEARTBEAT = os.path.join(STATE, "state_ai_comms_manager", "heartbeat")
+SEEN = os.path.join(STATE, "state_ai_comms_manager_guard_nudged.json")
+README = ("Which Claude Code sessions watch-use-comms-manager-guard.py has already stopped once, per tool, so "
           "each is told about the comms manager only once. Keys are session ids; values map tool name to the "
           "time. Rows older than 30 days are dropped. Safe to delete.")
 MESSAGES = re.compile(r"\bg\s+search\b|\bgws\s+gmail\b|chat\.db\b|graph\.microsoft\.com|/api/v4/\S*posts")
 LOOP = re.compile(r"\b(while|until|sleep)\b")
 REASON = (
-    "STOP: watches go to the comms manager (claude_frontdesk.py) by default. Re-issue this identical call and it "
+    "STOP: watches go to the comms manager (ai_comms_manager.py) by default. Re-issue this identical call and it "
     "will go through; do that only if the watch SHOULD end with this session (the user ran /loop, a build or "
     "deploy you are narrating).\n\n"
     "%s dies with this session. The comms manager (a launchd job, every minute) outlives it: it wakes this "
     "session or its newest successor, even after the session stops; outside text is screened by an AI "
     "injection check and handed over as a file, never typed in. Rules: comms/README.md in knowledge-worker-stack, "
-    "and `claude_frontdesk.py --help`.\n\n"
-    "  claude_frontdesk.py add <description> --what TEXT --then TEXT \\\n"
+    "and `ai_comms_manager.py --help`.\n\n"
+    "  ai_comms_manager.py add <description> --what TEXT --then TEXT \\\n"
     "    (--every 10m | --daily HH:MM | --at 'YYYY-MM-DD HH:MM') --until 14d|YYYY-MM-DD|never \\\n"
     "    [--repeat] [--max-per-day N] -- <kind> <args>\n"
     "  kinds: gmail_new '<gmail query>' | outlook_new <address> | imessage_new <thread> | "
     "mattermost_new <channel> | new_files <dir> <patterns> | timer (no args)\n"
-    "  claude_frontdesk.py list | rm <name>")
+    "  ai_comms_manager.py list | rm <name>")
 
 
 def claim(sid, tool):

@@ -105,8 +105,8 @@ while IFS=$'\t' read -r pane uuid status; do
   # The comms manager's per-session wake lock, when installed, so two wakers never type at once;
   # busy (exit 75) is retried next minute like any refusal.
   tell=(herdr_session_manage.sh tell "$uuid" "continue" --no-resume --timeout 60000)
-  if command -v claude_frontdesk.py >/dev/null 2>&1; then
-    out=$(claude_frontdesk.py wake-lock "$uuid" --wait 5 -- "${tell[@]}" 2>&1); trc=$?
+  if command -v ai_comms_manager.py >/dev/null 2>&1; then
+    out=$(ai_comms_manager.py wake-lock "$uuid" --wait 5 -- "${tell[@]}" 2>&1); trc=$?
   else
     out=$("${tell[@]}" 2>&1); trc=$?
   fi

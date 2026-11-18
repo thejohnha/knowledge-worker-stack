@@ -62,7 +62,7 @@ LOOKALIKE_PREFIX = (
     'This session is being continued from a previous conversation',
     # this package: the chief, its hourly wake, and the comms manager
     'From the user via the chief of staff', 'From the chief of staff', 'Scheduled wake (',
-    'From claude_frontdesk.py',
+    'From ai_comms_manager.py', 'From claude_frontdesk.py',   # the second: its name before the rename
     # this package: /successor's first prompt and closing report, and the auto-successor job
     'You are session ', 'You are the successor to ', 'CLOSING REPORT FROM YOUR PREDECESSOR', '[auto-successor]',
     # one session messaging another with `tell` opens "From session <its title>:" (the package's convention)

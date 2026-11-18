@@ -129,7 +129,7 @@ Every session with a title (set with `/rename`, or automatically by [claude-code
 - `~/.claude/state/state_claude_session_grid_cursor.json`: where the cursor was, so a restart lands on the same cell.
 - `~/.claude/state/state_claude_session_grid_autostart.log`: what the `ensure` job did.
 - `~/.claude/state/state_claude_session_grid_undelivered_prompt.txt`: your first-prompt words from `n`, kept when the start failed.
-- Reads, never writes: herdr's live state, the tab record `state_claude_session_herdr_tabs.json`, the account record `state_claude_session_accounts.json` (no row = `default`), and the comms manager's `state_claude_frontdesk/` (absent = no `◷`).
+- Reads, never writes: herdr's live state, the tab record `state_claude_session_herdr_tabs.json`, the account record `state_claude_session_accounts.json` (no row = `default`), and the comms manager's `state_ai_comms_manager/` (absent = no `◷`).
 - `t` also updates `state_claude_session_titles.json` and `state_claude_session_title_lineage.json` when they exist (from [claude-code](../../claude-code/)'s dated titles and `/retitle`), so a resumed session keeps the new name.
 - `herdr_session_bookmarks.py toggle <session-id>` / `list` sets or lists bookmarks from the command line.
 - `claude_session_lineage_delete_or_archive.py delete|archive <session-id>` is `d` and `a` from the command line, for any session, parked or not: it lists the lineage, asks (the archive folder too, Tab completes), and drops every grid cell of the lineage in every workspace. Same refusals as `d` and `a`; `--check` lists the members and runs the refusals without changing anything. It needs a terminal to ask in, and `herdr_session_grid.py` beside it.

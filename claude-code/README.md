@@ -456,7 +456,7 @@ rm -f ~/.claude/state/state_claude_session_keep_skip_mode.* ~/.claude/state/stat
 
 ### Known limits
 - herdr only. Outside herdr the `skip` word is answered with "not armed", and a resume out of skip mode is left as it is.
-- A tool that wakes sessions on outside events can keep a woken session in auto mode, on purpose, since nobody is watching it: it stamps the session in `~/.claude/state/state_claude_frontdesk_wakes.json` (session id → Unix time) just before resuming it, and a stamp under 15 minutes old wins. No file, no effect.
+- A tool that wakes sessions on outside events can keep a woken session in auto mode, on purpose, since nobody is watching it: it stamps the session in `~/.claude/state/state_ai_comms_manager_wakes.json` (session id → Unix time) just before resuming it, and a stamp under 15 minutes old wins. No file, no effect.
 
 ## 10. Prime directive
 Every session carries two sentences: the **prime directive** (what the session is for) and **done_when** (the fact that will be true when it is finished). A hook puts both in front of Claude on every message, so a long session stays on its job. If they are not set after three messages, it asks you for them. `/prime-directive` shows, sets, changes or closes them.

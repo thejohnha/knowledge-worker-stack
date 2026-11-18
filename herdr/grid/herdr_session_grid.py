@@ -52,7 +52,7 @@ def _categories():
 CATEGORIES = _categories()
 UNSORTED = "unsorted"   # the row an adopted lineage lands in when nothing else names one
 ACCOUNTS = f"{HOME}/.claude/state/state_claude_session_accounts.json"   # uuid -> account; absent = default
-WAKES = f"{HOME}/.claude/state/state_claude_frontdesk"     # the comms manager's wake requests: one <name>.json each, gone once disarmed; absent = none
+WAKES = f"{HOME}/.claude/state/state_ai_comms_manager"     # the comms manager's wake requests: one <name>.json each, gone once disarmed; absent = none
 # The first prompt `n` sends when a few words were typed: the words as typed, so the first turn does the work.
 SEED = "{words}"
 README = ("The grid's own memory: workspace row order, and per workspace the ordered cells. A cell with "
