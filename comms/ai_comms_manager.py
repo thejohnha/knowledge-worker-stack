@@ -171,12 +171,21 @@ def find(name):
 
 
 def lineage(uuid):
+    """(newest uuid, title, open|closed|unknown). No helper installed, or exit 1 with no stderr (a uuid the
+    state files never saw): a lineage of one. Any other failure is "unknown", so a broken helper holds
+    deliveries instead of waking a session whose lineage may be closed."""
     helper = shutil.which(LINEAGE)
     if not helper:
         return uuid, "", "open"
-    r = subprocess.run([sys.executable, "-I", helper, uuid], capture_output=True, text=True)
-    if r.returncode != 0 or not r.stdout.strip():
+    try:
+        r = subprocess.run([sys.executable, "-I", helper, uuid], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as x:
+        r = subprocess.CompletedProcess([], 99, "", str(x))
+    if r.returncode == 1 and not r.stderr.strip():
         return uuid, "", "open"
+    if r.returncode != 0 or not r.stdout.strip():
+        log("lineage helper failed for %s (rc %s): %s" % (uuid[:8], r.returncode, r.stderr.strip()[-200:]))
+        return uuid, "", "unknown"
     u, _num, title, state = (r.stdout.rstrip("\n").split("\t") + ["", "", "", "open"])[:4]
     return u, title, state
 
@@ -844,6 +853,8 @@ def cmd_deliver(a):
     target, title, closed = lineage(r["owner"])
     if closed == "closed":
         return finish("held", "lineage closed")
+    if closed == "unknown":
+        return finish("held", "the lineage helper failed; see the log")
     with Lock("wake-" + target, block=False) as got:
         if not got:
             return finish("held", "another wake of this session is in progress", target)
