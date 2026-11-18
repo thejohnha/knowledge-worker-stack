@@ -19,9 +19,9 @@
 #   herdr_session_manage.sh move [<TARGET>] <WORKSPACE> [--label TEXT] [--new] [--focus]
 #                                        (TARGET: this | <UUID> | <PANE> | <TAB> | a tab label; default this.
 #                                         WORKSPACE: an id, or any unambiguous part of its label)
-#   herdr_session_manage.sh tell <UUID|PANE> <message> [--timeout MS] [--no-resume]
+#   herdr_session_manage.sh tell <UUID|ID PREFIX|PANE> <message> [--timeout MS] [--no-resume]
 #                                        [--workspace wN] [--label TEXT] [--agent-name NAME]
-#                                        [--exact] [--new-tab]
+#                                        [--exact] [--new-tab] [--now]
 #     tell never sends a message that is only `skip`: in the target that is the user's skip-mode command.
 #     tell exit codes: 0 delivered and PROVED off the target's transcript; 1 refused before
 #     sending, or something arrived that is not what was sent; 2 usage; 3 SENT but not confirmed
@@ -74,7 +74,7 @@ set -uo pipefail
 
 usage() { sed -n '2,/^# Why each verb/p' "$0" | sed -e '$d' -e '$d' -e 's/^# \{0,1\}//' >&2; }  # synopsis + examples, delimited by ADDRESS not a line number so a concurrent synopsis insert cannot truncate them; the rationale below is for readers, not the usage line
 die() { echo "herdr_session_manage: $*" >&2; exit 1; }
-die_usage() { echo "herdr_session_manage: $*" >&2; echo >&2; usage; exit 2; }
+die_usage() { echo "herdr_session_manage: $*" >&2; echo >&2; usage; echo >&2; echo "herdr_session_manage: $*" >&2; exit 2; }   # the reason again LAST: a caller reading `| tail -1` saw only the usage's final example line
 need() { command -v "$1" >/dev/null 2>&1 || die "missing dependency: $1"; }
 # The flag fails SOFT in claude: a typo prints one stderr line and the session runs at the default.
 # bypassPermissions is refused: this script runs on an agent's word, and skip mode is the user's call alone.
@@ -485,7 +485,13 @@ cmd_start() {
   done
   grep -q '"result"' <<<"$out" || die "agent start failed: $out"
 
+  # herdr attaches the session id a few seconds AFTER agent start returns, so poll for it.
   local uuid; uuid=$(printf '%s' "$out" | jget agent.agent_session.value)
+  for i in $(seq 1 15); do
+    [ -n "$uuid" ] && break
+    sleep 1
+    uuid=$(herdr agent get "$pane" 2>/dev/null | jget agent.agent_session.value)
+  done
   [ -n "$uuid" ] || die "agent started but herdr reports no session id"
 
   # The SessionStart hook owns the account sidecar. Verify, never write it.
@@ -900,6 +906,22 @@ pid=sys.argv[1]
 for a in json.load(sys.stdin).get("result",{}).get("agents",[]):
     if a.get("pane_id")==pid: print(a.get("agent_status") or "")' "$1"
 }
+uuid_of_prefix() {  # <hex prefix, 8+ chars> — the ONE session id it starts, or die naming why not.
+  # Candidates: every live agent's session id plus every transcript at the top of a project folder
+  # (archived lineages sit a level deeper and are not addressable).
+  local hits
+  hits=$( { herdr agent list 2>/dev/null | python3 -c '
+import json,sys
+for a in json.load(sys.stdin).get("result",{}).get("agents",[]): print((a.get("agent_session") or {}).get("value") or "")' 2>/dev/null
+            for f in "$HOME"/.claude/projects/*/"$1"*.jsonl; do [ -f "$f" ] && basename "$f" .jsonl; done; } \
+          | grep -E "^$1[0-9a-f-]*$" | grep -E '^[0-9a-f-]{36}$' | sort -u)
+  case $(printf '%s' "$hits" | grep -c .) in
+    1) printf '%s\n' "$hits";;
+    0) die "no live session or transcript id starts with '$1' (archived sessions are not addressable) — nothing was sent";;
+    *) die "'$1' is ambiguous — it starts $(printf '%s' "$hits" | grep -c .) session ids: $(printf '%s' "$hits" | tr '\n' ' ')— nothing was sent; give more characters";;
+  esac
+}
+
 pane_of_uuid() {  # <uuid> — the pane a LIVE session occupies, empty if it is not running.
   # Matched on agent_session.value, never on a remembered pane id: a pane addresses a
   # LOCATION, and the next agent started there inherits the same id.
@@ -930,7 +952,7 @@ wait_ready() {
 }
 
 cmd_tell() {
-  local target="" msg="" tmo=300000 ws="" label="" aname="" may_resume=yes exact=no newtab=no
+  local target="" msg="" tmo=300000 ws="" label="" aname="" may_resume=yes exact=no newtab=no now=no
   target="${1:-}"; shift || true
   msg="${1:-}";    shift || true
   [ -n "$target" ] || die_usage "tell needs a target — a 36-character session UUID, or a pane id like w8:p3"
@@ -956,11 +978,16 @@ cmd_tell() {
       --no-resume)  may_resume=no; shift;;
       --exact)      exact=yes; shift;;
       --new-tab)    newtab=yes; shift;;
+      --now)        now=yes; shift;;         # into a WORKING session at once: Ctrl+Enter, no wait for idle
       *) die "tell: unknown option $1";;
     esac
   done
 
   local uuid="" pane="" resumed=no
+  if [[ "$target" =~ ^[0-9a-f]{8}(-[0-9a-f-]*)?$|^[0-9a-f]{8,35}$ ]] && [ ${#target} -lt 36 ]; then   # a short id, as the status line shows it
+    target=$(uuid_of_prefix "$target") || exit 1
+    echo "tell: resolved to session $target" >&2
+  fi
   if [[ "$target" =~ ^[0-9a-f-]{36}$ ]]; then
     uuid="$target"; pane=$(pane_of_uuid "$uuid")
   elif [[ "$target" =~ ^[A-Za-z0-9]+:p[A-Za-z0-9]+$ ]]; then
@@ -970,7 +997,7 @@ cmd_tell() {
     # was here" would be a guess. The UUID is the only durable handle.
     [ -n "$uuid" ] || die "tell: $pane holds no live session — a pane id names a LOCATION, not a session, so there is nothing here to resume. Pass the session UUID instead."
   else
-    die_usage "tell: '$target' is neither a 36-character session UUID nor a pane id like w8:p3"
+    die_usage "tell: '$target' is neither a session UUID (or a unique 8+ character prefix of one) nor a pane id like w8:p3 — nothing was sent"
   fi
 
   # A message for a series belongs to the member that holds the work, and resurrecting an old
@@ -1014,11 +1041,39 @@ cmd_tell() {
     resumed=yes
   fi
 
+  # One send at a time per pane, held from the readiness gate to the restore. Each send lifts whatever
+  # is in the box and puts it back afterwards, so two sends that interleave lift each other's half-typed
+  # message and restore it as a stale draft, with old messages and "[Pasted text #N]" placeholders
+  # that later sends then glue onto. The
+  # lock is flock on a per-pane file (fd 9, so any exit releases it); python takes it because macOS
+  # ships no flock binary. A send queued behind another simply waits its turn, then for idle. A FIXED
+  # path, never $TMPDIR: cron has no TMPDIR, so a scheduled send would lock in /tmp while a
+  # session's lock under /var/folders, and neither would see the other.
+  local lockdir="$HOME/.claude/state/herdr_tell_locks"; mkdir -p "$lockdir"
+  exec 9>"$lockdir/${pane//:/_}.lock"
+  python3 -c '
+import fcntl, sys, time
+end = time.time() + int(sys.argv[1]) / 1000
+while True:
+    try: fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB); break
+    except BlockingIOError:
+        if time.time() > end: sys.exit(1)
+        time.sleep(0.2)' "$tmo" || die "tell: another send to $pane kept its box for ${tmo}ms — nothing was sent"
+
   # The readiness gate. blocked is the one that has to be named rather than waited out: the
   # session is stopped on a question it needs answered, and a message sent into that queues
   # behind the question instead of being read. Queued is not delivered.
   local st rc
-  st=$(wait_ready "$pane" "$tmo"); rc=$?
+  if [ "$now" = yes ]; then
+    # --now goes in without waiting for the turn to end: Ctrl+Enter makes Claude Code take a
+    # typed message at once, moving a running foreground command to the background (it keeps
+    # running and reports back) instead of stopping it the way Escape does. Still refused while
+    # blocked, for the same reason as below.
+    local i; for i in 1 2 3 4 5; do st=$(agent_status_of "$pane"); [ -n "$st" ] && break; sleep 1; done
+    case "$st" in idle|done|working) rc=0;; *) rc=1;; esac
+  else
+    st=$(wait_ready "$pane" "$tmo"); rc=$?
+  fi
   case "$st" in
     blocked) die "tell: $pane is BLOCKED on a prompt it needs answered — a message sent now would queue behind that question rather than be read. Answer it first; nothing was sent.";;
   esac
@@ -1059,13 +1114,21 @@ cmd_tell() {
   local tr; tr=$(transcript_path "$uuid" 2>/dev/null) || tr=""
   local before=0; [ -f "$tr" ] && before=$(wc -l < "$tr" | tr -d ' ')
 
-  herdr agent prompt "$pane" "$msg" --wait --until working --timeout 30000 >/dev/null 2>&1
+  if [ "$now" = yes ]; then
+    pane_restore_box "$pane" "$msg"                # typed line by line, shift+enter between: a literal newline would submit early
+    herdr pane send-keys "$pane" ctrl+enter >/dev/null 2>&1
+    # The lifted draft goes back only once the box has emptied, or it would join the message.
+    local w; for w in $(seq 1 25); do [ "$(pane_draft "$pane" 2>/dev/null)" = "" ] && break; sleep 0.2; done
+  else
+    herdr agent prompt "$pane" "$msg" --wait --until working --timeout 30000 >/dev/null 2>&1
+  fi
 
   # Put the lifted text back now rather than at exit: the box is free the moment the prompt is
   # submitted, and the verification below can take time you would spend looking at an input box
   # your words have vanished from.
   tell_restore_draft
   trap - EXIT INT TERM
+  exec 9>&-                                      # the box is done with: the next queued send may go
 
   # Confirm delivery by reading the TARGET'S TRANSCRIPT, never the return value of the send:
   # a send that returns 0 has proved that herdr accepted a string, not that a session received

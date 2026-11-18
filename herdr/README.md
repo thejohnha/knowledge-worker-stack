@@ -252,6 +252,7 @@ herdr_session_manage.sh move this project-a  # carry this session's pane, label 
 herdr_session_manage.sh tell <uuid> "the folder moved; re-read it before you act"
 ```
 - `tell` gets a message into a session whether or not it is running: it resumes a stopped one through `cr`, waits until it is idle, refuses one that is blocked on a question, lifts any unsent text out of the box and puts it back afterwards, and proves delivery by finding the message in the target's own transcript. Exit 0 delivered, 1 refused or arrived wrong, 2 usage, 3 sent but not yet confirmed: read the target's transcript before you ever resend, because a resend double-prompts it.
+- `tell` takes the first 8 or more characters of a session id when they match only one session. `--now` delivers into a session in the middle of a turn instead of waiting for it to finish: a command it is running keeps going in the background. Two sends to the same session take turns, so neither one picks up the other's half-typed text.
 - A message one session sends another should open with `From session <sender's title>:`. The comms owed scan ([`../comms/`](../comms/)) uses that opening to tell a session's message from yours; `tell` itself does not add or check it.
 - `resume` and `tell` on an older, stopped member of a numbered series ("Notes 24" when "Notes 25" exists) go to the newest member instead; `--exact` overrides.
 - A resumed session goes back where it lived: its old pane if that is at a shell, else that pane's workspace, else a new workspace. Never into the caller's.
