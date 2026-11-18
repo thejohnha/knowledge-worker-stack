@@ -192,7 +192,7 @@ plutil -lint local.knowledge-worker-stack.claude-chief-of-staff-phone-bridge.pli
 - A text from the phone never lets the chief send, post, submit or pay in your name, and it tells sessions so when it relays your answer: any session can type the bridge's opening line into the chief, and any session that can read the vault can post to your phone as the bot.
 - For two hours after your last text, the chief's other finished turns are forwarded too. While you are at the Mac (input in the last 10 minutes), nothing goes to the phone.
 - Busy chief: your texts are held and go in together once it is free. Mattermost down: posts queue and go out marked delayed.
-- Topics: the chief can file each subject in its own thread (`--topics`, `--rename`, `--threads off`).
+- Topics: the chief can file each subject in its own thread (`--topics`, `--rename`, `--threads off`). If you delete a thread's first post, the topic starts a new thread on its next post.
 
 ## Remove it
 ```bash

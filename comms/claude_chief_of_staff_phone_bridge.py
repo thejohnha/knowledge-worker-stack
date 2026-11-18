@@ -107,7 +107,19 @@ AWAY = 10 * 60                    # keyboard/mouse idle this long: the user is a
 PREFIX = "From the user via Mattermost (their phone; your reply is posted back to them there, so keep it short): "
 RETRY = (5, 15, 30, 60, 120, 300)  # seconds between tries of a failed post: rides out a ~9 min outage
 WAKE = "Scheduled wake (claude_chief_of_staff_wake.sh"   # its reply is never forwarded: it repeats reminders
+NOPHONE = "[no-phone]"   # a chief reply whose first or last line is this stays off the phone
 AUTOMATED = ("from_webhook", "from_bot", "from_plugin", "override_username")
+
+
+def no_phone(text):
+    """True when the chief marked this reply as not for the phone: its first or last line is [no-phone]."""
+    lines = [ln.strip() for ln in (text or "").strip().splitlines()] or [""]
+    return NOPHONE in (lines[0], lines[-1])
+
+
+def strip_no_phone(text):
+    """`text` without any bare [no-phone] line: the marker is for the bridge, never for the user to read."""
+    return "\n".join(ln for ln in text.splitlines() if ln.strip() != NOPHONE).strip()
 
 
 def log(msg):
@@ -307,7 +319,7 @@ def to_forward(recs, start):
         if b is None and not any(r.get("type") == "system" and r.get("subtype") == "turn_duration" for r in body):
             break
         reply, pt = reply_in(body)[0], prompt_text(recs[a])
-        if reply and not pt.startswith(PREFIX) and WAKE not in pt[:300]:
+        if reply and not pt.startswith(PREFIX) and WAKE not in pt[:300] and not no_phone(reply):
             out.append((reply, recs[a].get("timestamp", "")))
         new = b if b is not None else len(recs)
     return out, new
@@ -426,6 +438,28 @@ def topic_root(mm, dm, key, title, ask_root, path=None):
         return root, title, not ask_root
 
 
+def root_gone(mm, root):
+    """True when the post `root` was deleted; False if it is there or can't be checked."""
+    try:
+        return bool(mm.api("GET", f"/posts/{root}").get("delete_at"))
+    except urllib.error.HTTPError as e:
+        return e.code == 404
+    except Exception:
+        return False
+
+
+def forget_topic(key, path=None):
+    """Drop `key` from the topics file (locked)."""
+    path = path or TOPICS
+    with open(path + ".lock", "a") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        t = topics(path)
+        t.pop(key, None)
+        with tempfile.NamedTemporaryFile("w", dir=os.path.dirname(path), delete=False) as f:
+            json.dump(t, f, indent=1)
+        os.replace(f.name, path)
+
+
 def deliver(mm, dm, text, ask_root=None, path=None):
     """Post the chief's text. ask_root: where the user asked — the thread's root, "" for top level, None for
     a forward or push. With THREADS off only the tag line is taken off: everything posts top-level."""
@@ -436,7 +470,17 @@ def deliver(mm, dm, text, ask_root=None, path=None):
         if not key:
             return mm.post(dm, body, root=ask_root or "")
         root, title, opened = topic_root(mm, dm, key, readable_title(key, title, body), ask_root, path)
-        pid = mm.post(dm, body, root=root)
+        try:
+            pid = mm.post(dm, body, root=root)
+        except urllib.error.HTTPError as e:
+            # The thread's first post was deleted: Mattermost answers 400 "Invalid RootId" for good.
+            # Reopen the topic under its title instead of going top-level forever.
+            if e.code != 400 or not root_gone(mm, root):
+                raise
+            log(f"topic {key}: its thread's first post is gone; opening the topic again")
+            forget_topic(key, path)                  # `title` is already the stored one
+            root, title, opened = topic_root(mm, dm, key, title, ask_root if ask_root != root else None, path)
+            pid = mm.post(dm, body, root=root)
     except Unreachable:
         raise                                        # Mattermost is down: top-level would fail the same way
     except Exception as e:                           # any threading failure: top-level, exactly as before
@@ -467,6 +511,7 @@ def locked_json(path, change):
 
 def send(mm, dm, text, ask_root=None):
     """deliver(), or the outbox when Mattermost can't be reached through every retry. True if posted."""
+    text = strip_no_phone(text) if NOPHONE in text else text   # a --post that carries the marker: never show it
     try:
         deliver(mm, dm, text, ask_root)
         return True
@@ -629,8 +674,12 @@ def exchange(mm, dm, bot_id, text, root=""):
         if st in ("idle", "done", "blocked", "gone"):
             answer, question = reply_after(path, int(rec))
             if st == "blocked" and question:
-                say((split_tag(answer)[2] + "\n\n" if answer else "") + "The chief is waiting on this question at the Mac "
+                say((strip_no_phone(split_tag(answer)[2]) + "\n\n" if answer else "") + "The chief is waiting on this question at the Mac "
                         "and can only be answered there; a text sent meanwhile is held until then:\n\n" + question)
+                return
+            if answer and no_phone(answer):
+                # An answer to the user's own text can be marked too (an interim "passed it on"): not posted.
+                log("reply marked [no-phone]; not posted")
                 return
             if answer:
                 if already_pushed(answer, bot_posts_since(mm, dm, bot_id, t0ms)):
