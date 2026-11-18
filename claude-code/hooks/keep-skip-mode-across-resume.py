@@ -16,7 +16,7 @@ per-session guard allows one arming per 15 minutes, so a restart that fails to a
 Prints one line into the session's context, so it knows the restart is coming rather than guessing.
 Log: ~/.claude/state/state_claude_session_keep_skip_mode.log
 """
-import json, mmap, os, subprocess, sys, time
+import json, mmap, os, re, subprocess, sys, time
 
 STATE = os.path.expanduser("~/.claude/state/state_claude_session_keep_skip_mode.json")
 LOG = os.path.expanduser("~/.claude/state/state_claude_session_keep_skip_mode.log")
@@ -45,7 +45,8 @@ def mode_from_process():
         out = subprocess.run(["ps", "-o", "ppid=,args=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
         if not out: return ""
         ppid, args = out.split(None, 1)
-        if args.split()[0].endswith("claude"): return "bypassPermissions" if "--dangerously-skip-permissions" in args else "other"
+        # /restart re-execs with `--permission-mode bypassPermissions`, not the dangerous flag
+        if args.split()[0].endswith("claude"): return "bypassPermissions" if re.search(r"--dangerously-skip-permissions|--permission-mode[ =]bypassPermissions", args) else "other"
         pid = int(ppid)
     return ""
 

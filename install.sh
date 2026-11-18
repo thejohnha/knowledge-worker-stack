@@ -23,6 +23,7 @@
 #   comms              comms manager, chief of staff, Priorities list         default
 #   imessage           wake sessions on incoming iMessage/SMS (comms guide)   add with --only (after comms)
 #   phone-bridge       text the chief of staff from the Mattermost app        add with --only (after mattermost)
+#   update-restart     /restart idle sessions after a Claude Code update      add with --only (after herdr)
 #
 # Safe to run again: anything already in place is left alone. Every file it replaces, and settings.json
 # and ~/.zshrc before any edit, are copied to ~/knowledge-worker-stack-backups/install/<time>/ first. What it adds is
@@ -34,7 +35,7 @@
 set -u
 
 REPO=$(cd "$(dirname "$0")" && pwd)
-ALL="secret-dialog vault browser-macos browser-orbstack herdr starter-claude-md claude-code model-sync google office grid mattermost comms imessage phone-bridge"
+ALL="secret-dialog vault browser-macos browser-orbstack herdr starter-claude-md claude-code model-sync google office grid mattermost comms imessage phone-bridge update-restart"
 DEFAULT="secret-dialog vault herdr starter-claude-md claude-code grid comms"
 DRY=0 UNINSTALL=0 ONLY="" SKIP=""
 while [ $# -gt 0 ]; do
@@ -1014,6 +1015,26 @@ c_phone_bridge() {
 </dict></plist>"
 }
 
+c_update_restart() {
+  [ -x "$HOME/bin/herdr_session_manage.sh" ] || { [ "$DRY" = 1 ] && in_sel herdr; } || { warn "install herdr first (./install.sh --only herdr,update-restart)"; return 1; }
+  local bp=${BREWP:-/opt/homebrew} st
+  put update-restart "$REPO/herdr/claude_restart_sessions_after_update.py" "$HOME/bin/claude_restart_sessions_after_update.py" 755
+  mkd update-restart 700 "$HOME/.claude/state"
+  for st in state_claude_restart_sessions_after_update.json state_claude_restart_sessions_after_update.log; do
+    rec update-restart state "$HOME/.claude/state/$st"; done
+  agent update-restart local.knowledge-worker-stack.claude-restart-sessions-after-update "$PH
+<plist version=\"1.0\">
+<dict>
+  <key>Label</key><string>local.knowledge-worker-stack.claude-restart-sessions-after-update</string>
+  <key>ProgramArguments</key><array><string>$HOME/bin/claude_restart_sessions_after_update.py</string></array>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>$HOME/bin:$HOME/.local/bin:$bp/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
+  <key>StartInterval</key><integer>300</integer>
+  <key>StandardErrorPath</key><string>$HOME/Library/Logs/knowledge-worker-stack/claude_restart_sessions_after_update_launchd.log</string>
+</dict>
+</plist>"
+}
+
 # ===================================================================================================
 # Uninstall: undo the record, newest first, for the chosen parts. Shared lines (the ~/bin PATH line)
 # go only when everything is uninstalled.
@@ -1160,6 +1181,8 @@ verify() {
     mattermost) chk "Mattermost answers on localhost:8065" 'curl -fs http://localhost:8065/api/v4/system/ping' ;;
     phone-bridge) chk "mattermost_post.py --check" '"$HOME/bin/mattermost_post.py" --check'
                   chk "LaunchAgent phone bridge loaded" 'loaded local.knowledge-worker-stack.claude-chief-of-staff-phone-bridge' ;;
+    update-restart) chk "LaunchAgent local.knowledge-worker-stack.claude-restart-sessions-after-update loaded" 'loaded local.knowledge-worker-stack.claude-restart-sessions-after-update'
+                    chk "claude_restart_sessions_after_update.py --dry-run" '"$HOME/bin/claude_restart_sessions_after_update.py" --dry-run' ;;
   esac; done
   if [ -f "$SETTINGS" ]; then
     chk "settings.json is valid JSON" 'python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$SETTINGS"'

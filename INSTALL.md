@@ -34,6 +34,7 @@ mkdir -p ~/knowledge-worker-stack && curl -fsSL https://github.com/thejohnha/kno
 ./install.sh --only google                   # for Gmail, Drive, Sheets, Docs, Calendar
 ./install.sh --only office                   # for Excel workbooks
 ./install.sh --only imessage                 # for incoming texts (after comms)
+./install.sh --only update-restart           # restart idle sessions after a Claude Code update (after herdr)
 ```
 - Without Homebrew (or Apple's command line tools) it changes nothing and prints the one command that installs it: walk the user through it (below), then run `./install.sh` again.
 - If it says `~/.claude/CLAUDE.md exists, so the starter was not copied`, offer to merge `claude-code/CLAUDE.starter.md` into the user's file, and show what it would add before saving. At least its "Credentials and security" section goes in.

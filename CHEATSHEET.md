@@ -66,4 +66,5 @@ Under the input box, `Cx:` shows how full the session is: green is fine, yellow 
 
 ## If something looks wrong
 - Sessions gone after a restart: in a plain Terminal (not inside herdr), type `hr` and press Enter.
+- A session's screen goes blank for about 15 seconds, then comes back: if update-restart is installed, that is the session moving to a new Claude Code version.
 - Ask the agent. It can read every guide in this folder.

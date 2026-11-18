@@ -10,6 +10,7 @@
 - **Restore and restart**: put back every session that was running, or restart herdr and do that in one step.
 - **Hourly backups** of the layout, the session mapping and your herdr config, kept locally.
 - **`claude_exit_session.sh`**: a session exits itself and closes its tab.
+- **Restart after an update** (optional): `/restart` typed into idle sessions once Claude Code has updated itself.
 
 The grid (`grid/`) builds on this folder; set this one up first.
 
@@ -27,6 +28,7 @@ The grid (`grid/`) builds on this folder; set this one up first.
 | `herdr_session_restart_and_restore.py` | `~/bin` | restarts herdr and restores, from outside the panes it kills |
 | `herdr_session_snapshot.sh` | `~/bin` | the hourly local backup |
 | `claude_exit_session.sh` | `~/bin` | exit this session and close its tab |
+| `claude_restart_sessions_after_update.py` | `~/bin` | optional, step 9: restart idle sessions onto a new Claude Code build |
 
 State the tools keep, all in `~/.claude/state/`: `state_claude_session_herdr_tabs.json` (tab -> session), `state_claude_herdr_live_sessions.json` (the running set), `state_claude_session_last_herdr_pane.json` (session -> pane). Backups: `~/knowledge-worker-stack-backups/herdr`.
 
@@ -167,6 +169,57 @@ Merge into `~/.claude/settings.json` (keep existing `PreToolUse` entries):
   { "type": "command", "command": "python3 ~/.claude/hooks/prompt-suggestion-misread-guard.py", "timeout": 5 }
 ] } ] } }
 ```
+
+### 9. Restart sessions after a Claude Code update (optional)
+When Claude Code updates itself, every running session stays on the old build and shows `✔ Update installed · /restart to apply` above its input box until you type `/restart`. This job types it for you, every 5 minutes, into each session that is safely idle. `/restart` restarts the session in place: same pane, session id, account and permission mode, no model turn, and session-only scheduled jobs survive it. Claude Code refuses it while background work runs, so a shell or Monitor is never killed. The screen is blank for about 15 seconds mid-restart.
+
+A session is restarted only when all of these hold:
+- herdr says idle or done (never working, never blocked on a question or permission prompt), and its pane runs an older version than `~/.local/bin/claude` points at.
+- The notice is the line directly above the input box (a conversation that quotes it does not count), and the footer shows no background shells or monitors.
+- Its transcript has not been written for 3 minutes.
+- You are not at it: it is not the focused pane while the Mac has had keyboard or mouse input in the last 10 minutes.
+- Claude Code has not refused to restart it in the last 30 minutes.
+- Right before typing, under the herdr session manager's per-pane send lock (and the comms manager's per-session wake lock when [`../comms/`](../comms/) is installed): still idle, and the input box empty.
+
+At most 3 per sweep. Each is checked afterwards (same session back on the new version, notice gone) and logged to `~/.claude/state/state_claude_restart_sessions_after_update.log` as `restarted`, `refused` or `unconfirmed`. A skip-mode session comes back as `--permission-mode bypassPermissions`, which the skip-mode hook in [`../claude-code/`](../claude-code/) (piece 9) counts as skip mode.
+
+Not in the default install. From the repo folder: `./install.sh --only update-restart` (herdr installed first). By hand:
+```bash
+install -m 755 claude_restart_sessions_after_update.py ~/bin/
+cat > ~/Library/LaunchAgents/local.knowledge-worker-stack.claude-restart-sessions-after-update.plist << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>local.knowledge-worker-stack.claude-restart-sessions-after-update</string>
+  <key>ProgramArguments</key><array><string>$HOME/bin/claude_restart_sessions_after_update.py</string></array>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>$HOME/bin:$HOME/.local/bin:$(brew --prefix)/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
+  <key>StartInterval</key><integer>300</integer>
+  <key>StandardErrorPath</key><string>$HOME/Library/Logs/knowledge-worker-stack/claude_restart_sessions_after_update_launchd.log</string>
+</dict>
+</plist>
+EOF
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.knowledge-worker-stack.claude-restart-sessions-after-update.plist
+claude_restart_sessions_after_update.py --dry-run              # what it would restart now; why a session showing the notice is skipped
+claude_restart_sessions_after_update.py --only <uuid prefix>   # one session only
+```
+
+#### Remove it
+`./install.sh --uninstall --only update-restart`, or by hand:
+```bash
+launchctl bootout gui/$(id -u)/local.knowledge-worker-stack.claude-restart-sessions-after-update
+rm ~/Library/LaunchAgents/local.knowledge-worker-stack.claude-restart-sessions-after-update.plist ~/bin/claude_restart_sessions_after_update.py
+rm -f ~/.claude/state/state_claude_restart_sessions_after_update.*
+```
+
+#### Known limits
+- Needs Claude Code's native install, where `~/.local/bin/claude` links to a versioned build; otherwise it logs an error and restarts nothing.
+- It reads Claude Code's screen (the notice, the `❯` input line, the `⏵` mode line). If Claude Code changes that layout, the notice stops matching and nothing is restarted until this script is updated.
+- If the Mac's idle time cannot be read, a focused pane counts as unattended.
+- A restart slower than 90 seconds is logged `unconfirmed` and not checked again.
+
+Tested on macOS 26 in a throwaway home folder with stand-ins for herdr, the herdr session manager, `ioreg` and the transcript finder: each gate's refusal paired with a pass, the typed `/restart` and its check, a refusal and its 30-minute wait, with and without the comms manager's wake lock, and `--dry-run` writing nothing; the installer part (left out by default, installed with `--only`, a second run with no changes, dry run, uninstall). Not tested: a real `/restart` in a real Claude Code session, and the LaunchAgent firing on schedule.
 
 ## Use
 
