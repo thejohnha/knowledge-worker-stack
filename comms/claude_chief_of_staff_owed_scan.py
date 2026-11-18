@@ -49,6 +49,7 @@ HOME = os.path.expanduser('~')
 LINEAGE = os.path.join(HOME, '.claude/state/state_claude_session_title_lineage.json')
 STAMP = os.path.join(HOME, '.claude/state/state_claude_chief_of_staff_scan_stamp.json')
 SERVE_LOG = os.path.join(HOME, '.claude/state/state_claude_chief_of_staff_serve_log.jsonl')
+HERDR_DOWN = 3                 # exit code when herdr does not answer: the hourly wake skips rather than telling
 OWN_TAB_MIN = 60
 TAIL_CAP = 96 * 1024 * 1024          # read back at most this far looking for the user's last prompt
 BLOCK = 4 * 1024 * 1024
@@ -317,10 +318,15 @@ def judge(row, now):
 
 
 def live_rows():
-    agents = json.loads(subprocess.run(['herdr', 'agent', 'list'], capture_output=True, text=True, check=True).stdout)
+    try:
+        agents = json.loads(subprocess.run(['herdr', 'agent', 'list'], capture_output=True, text=True, check=True,
+                                           timeout=30).stdout)['result']['agents']
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as e:
+        print('owed scan: herdr is not answering, so there is no scan (%s)' % type(e).__name__, file=sys.stderr)
+        sys.exit(HERDR_DOWN)
     lineage, titles = finder.jload(LINEAGE), finder.jload(finder.TITLES)
     rows = []
-    for ag in agents['result']['agents']:
+    for ag in agents:
         uuid = (ag.get('agent_session') or {}).get('value', '')
         if ag.get('agent') != 'claude' or not uuid:
             continue
