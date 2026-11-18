@@ -2,7 +2,7 @@
 # keep_awake_watchdog.sh: while zz is on, puts the sleep block back if something turned it off.
 # Run by LaunchAgent local.knowledge-worker-stack.keep-awake-watchdog at login, every 60 s, and whenever
 # the power settings file changes. `pmset disablesleep` does not survive a restart, and other apps that
-# write the same flag (a battery app's calibration, for one) can leave it off; only this puts it back.
+# write the same flag can leave it off; only this puts it back.
 # Uses `sudo -n` only: it never asks for a password. Without the sudo rule it logs one line and waits.
 # Prints only when it does something; launchd appends that to the log.
 M="$HOME/.config/knowledge-worker-stack/keep-awake"

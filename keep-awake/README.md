@@ -4,7 +4,7 @@ The chief of staff, the comms manager and the phone bridge only work while the M
 
 - **`zz`**: blocks all system sleep (`pmset -a disablesleep 1`), idle and lid-closed alike, and says what the Mac does now.
 - **`zzz`**: normal sleep again (`pmset -a disablesleep 0`).
-- **`keep_awake_watchdog.sh`**: the block does not survive a restart, and other apps that write the same setting (a battery app's calibration, for one) can leave it off. While `zz` is on, this puts the block back, at login, every minute and whenever the power settings change.
+- **`keep_awake_watchdog.sh`**: the block does not survive a restart, and other apps that write the same setting can leave it off. While `zz` is on, this puts the block back, at login, every minute and whenever the power settings change.
 
 `zz` writes its choice to `~/.config/knowledge-worker-stack/keep-awake` before it changes the setting: the change itself wakes the watchdog, which must already see the new choice, or it would undo it. The file exists while `zz` is on.
 
