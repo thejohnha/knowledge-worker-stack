@@ -137,6 +137,7 @@ claude
 ```
 - Name the session "Chief of staff" (`/rename Chief of staff`); a date prefix, a category word and a series number ("Chief of staff 02") are fine, anything after the name is not. Every tool here finds the chief by that title (or by a prime directive naming `chief-of-staff.md`, if you use one), so one chief may be open at a time.
 - First message: `Read ~/.claude/chief-of-staff.md in full. You are the chief of staff. Follow it from now on.`
+- `claude_fleet_digest.py` prints one page on every live session: working or waiting, how long it has been quiet, its prime directive, and the end of its last reply. Read-only; `--json` for the same rows as JSON.
 - `claude_chief_of_staff_owed_scan.py` is its working list. Each run reads every live session and sorts what it is waiting on you for. Unclear replies go to Haiku (`claude -p --model haiku`), about one call per unclear session; `--no-model` skips that.
 - The hourly wake (launchd, above) types "Scheduled wake" into the chief only while it is live, idle, and nobody has typed to it for 25 minutes. It never resumes a stopped chief.
 - Its instructions end with a Trust ramp and a Preferences list, both empty: the chief adds a line each time you widen what it may do or correct how it works.

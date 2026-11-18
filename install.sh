@@ -909,7 +909,7 @@ c_comms() {
   local c="$REPO/comms" f changed=$CHANGES
   mkd comms 755 "$HOME/bin"
   mkd comms 700 "$HOME/.claude/state"
-  putmany comms "$c" "$HOME/bin" 755 ai_comms_manager.py ai_comms_manager_checks.py mattermost_post.py priorities.py \
+  putmany comms "$c" "$HOME/bin" 755 ai_comms_manager.py ai_comms_manager_checks.py mattermost_post.py priorities.py claude_fleet_digest.py \
     $(cd "$c" && ls claude_chief_of_staff_*.py claude_chief_of_staff_*.sh)
   put comms "$c/chief-of-staff-nothing-waiting-guard.py" "$HOME/.claude/hooks/chief-of-staff-nothing-waiting-guard.py" 644
   put comms "$c/watch-use-comms-manager-guard.py" "$HOME/.claude/hooks/watch-use-comms-manager-guard.py" 644
