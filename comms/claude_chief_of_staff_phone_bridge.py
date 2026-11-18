@@ -10,7 +10,7 @@ While you have texted within FORWARD_WINDOW, the chief's final reply from every 
 (a session reporting back, a background task ending) is posted to you too, so a result the chief
 promised reaches the phone without you asking again. The hourly wake's reply never is: it mostly
 repeats the same reminders, and real news from a pass is pushed with --post. A turn counts as finished
-when Claude Code writes its turn_duration record, or the next prompt begins. A message another session
+when Claude Code writes its turn_duration (or an unblocked stop_hook_summary) record, or the next prompt begins. A message another session
 sends the chief is written as a meta record, like a Stop-hook nudge; it starts a new turn when it lands
 after the chief's turn ended, and joins the running turn when it lands mid-turn.
 While you are working at this Mac (keyboard or mouse used within AWAY, and more recently than your last
@@ -239,6 +239,13 @@ def is_prompt(r, after_end=False):
         isinstance(b, dict) and b.get("type") == "tool_result" for b in c))
 
 
+def turn_end(r):
+    """Claude Code ends a turn with turn_duration, but can stop writing it for the rest of a session while
+    every turn still ends in a stop_hook_summary; a stop a hook blocked is not an end."""
+    return r.get("type") == "system" and (r.get("subtype") == "turn_duration" or (
+        r.get("subtype") == "stop_hook_summary" and not r.get("preventedContinuation") and not r.get("isSidechain")))
+
+
 def turn_starts(recs):
     """Indexes of the records in `recs` that start a turn; recs[0] is taken to be inside a turn."""
     ended = False
@@ -246,7 +253,7 @@ def turn_starts(recs):
         if is_prompt(r, ended):
             yield i
             ended = False
-        elif r.get("type") == "system" and r.get("subtype") == "turn_duration":
+        elif turn_end(r):
             ended = True
 
 
@@ -316,7 +323,7 @@ def to_forward(recs, start):
     out, new = [], start
     for a, b in zip(idx, idx[1:] + [None]):
         body = recs[a + 1:b]
-        if b is None and not any(r.get("type") == "system" and r.get("subtype") == "turn_duration" for r in body):
+        if b is None and not any(turn_end(r) for r in body):
             break
         reply, pt = reply_in(body)[0], prompt_text(recs[a])
         if reply and not pt.startswith(PREFIX) and WAKE not in pt[:300] and not no_phone(reply):
