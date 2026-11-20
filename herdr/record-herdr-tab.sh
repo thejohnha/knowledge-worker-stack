@@ -18,9 +18,10 @@
 # No title is stored: a copy here would go stale the first time the session is renamed. Readers join
 # a title on at read time.
 #
-# Up to five previous occupants are kept per tab, newest first. Any claude started INSIDE a pane
-# inherits that pane's HERDR_TAB_ID and records itself as the tab's session, a throwaway one included;
-# if its transcript is then deleted, history lets hr fall back to the previous occupant.
+# Up to five previous occupants are kept per tab, newest first: a tab's row can name a session whose
+# transcript is gone, and history lets hr fall back to the previous occupant. A claude started BY
+# another claude inherits the pane's HERDR_TAB_ID too; settings.json runs this hook through
+# skip-if-nested-claude.sh so such a run never takes the row.
 #
 # Idempotent; mkdir-locked so concurrent SessionStarts cannot clobber the store. Needs jq.
 set -euo pipefail

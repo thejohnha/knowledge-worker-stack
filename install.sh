@@ -223,7 +223,8 @@ path_line() { add_line common "$HOME/.zshrc" 'HOME/bin' "$PATHLINE"; }
 
 # ---- settings.json: merge, never replace ----------------------------------------------------------
 # stdin, one per line, tab-separated: hook<TAB>Event<TAB>matcher<TAB>command<TAB>timeout | allow<TAB>rule
-# | statusline<TAB>command | outputstyle<TAB>name | key<TAB>name<TAB>json-value (each set only when absent). Prints what it added (ADDED ...) or why it left something (KEPT ...).
+# | statusline<TAB>command | outputstyle<TAB>name | key<TAB>name<TAB>json-value (each set only when absent)
+# | wrap<TAB>Event<TAB>script: run that hook through skip-if-nested-claude.sh (remove: unwrap it). Prints what it added (ADDED ...) or why it left something (KEPT ...).
 SETTINGS_PY='
 import json, os, sys, shutil
 path, mode, dry, bkpath = sys.argv[1:5]
@@ -233,11 +234,17 @@ try:
     assert isinstance(data, dict)
 except Exception as e:
     print("ERROR\t%s is not valid JSON (%s)" % (path, e)); sys.exit(3)
-def key(cmd):
+WRAP = "bash ~/.claude/hooks/skip-if-nested-claude.sh "
+def key(cmd):   # the script a hook runs, looking past the wrapper
     for t in cmd.replace("\"", " ").replace("\x27", " ").split():
-        if "/" in t and t.endswith((".sh", ".py")):
+        if "/" in t and t.endswith((".sh", ".py")) and os.path.basename(t) != "skip-if-nested-claude.sh":
             return os.path.basename(t)
     return cmd
+def prune(ev):
+    if ev in data.get("hooks", {}):
+        data["hooks"][ev] = [g for g in data["hooks"][ev] if g.get("hooks")]
+        if not data["hooks"][ev]: del data["hooks"][ev]
+        if not data["hooks"]: del data["hooks"]
 out = []
 for s in spec:
     k = s[0]
@@ -255,12 +262,28 @@ for s in spec:
             out.append("ADDED\thook\t%s\t%s\t%s\t%s" % (ev, matcher, cmd, timeout))
         else:
             for g, h in hit:
-                if h.get("command") == cmd:
+                if h.get("command") in (cmd, WRAP + cmd):
                     g["hooks"].remove(h); out.append("REMOVED\thook\t%s" % cmd)
-            if ev in data.get("hooks", {}):
-                data["hooks"][ev] = [g for g in groups if g.get("hooks")]
-                if not data["hooks"][ev]: del data["hooks"][ev]
-                if not data["hooks"]: del data["hooks"]
+            prune(ev)
+    elif k == "wrap":
+        # herdr rewrites its own entry unwrapped on every `herdr integration install`, beside the wrapped
+        # one it does not recognize: a duplicate of a wrapped command is dropped, anything else wrapped.
+        ev, script = s[1], s[2]
+        hit = [(g, h) for g in data.get("hooks", {}).get(ev, []) for h in g.get("hooks", []) if key(h.get("command", "")) == script]
+        cmds = {h.get("command", "") for _, h in hit}
+        done = False
+        for g, h in hit:
+            c = h.get("command", "")
+            if mode == "add" and not c.startswith(WRAP):
+                if WRAP + c in cmds: g["hooks"].remove(h)
+                else: h["command"] = WRAP + c; cmds.add(WRAP + c)
+                done = True
+            elif mode == "remove" and c.startswith(WRAP):
+                if c[len(WRAP):] in cmds: g["hooks"].remove(h)
+                else: h["command"] = c[len(WRAP):]; cmds.add(c[len(WRAP):])
+                done = True
+        prune(ev)
+        if done: out.append(("ADDED\twrap\t%s\t%s" if mode == "add" else "REMOVED\twrap\t%s\t%s") % (ev, script))
     elif k == "allow":
         allow = data.get("permissions", {}).get("allow", [])
         if mode == "add":
@@ -574,17 +597,19 @@ c_herdr() {
   command -v jq >/dev/null || brew_get herdr formula jq || return 1
   mkd herdr 755 "$HOME/.claude/hooks" "$HOME/Library/Logs"
   mkd herdr 700 "$HOME/.claude/state"
-  if [ "$DRY" = 1 ] && ! command -v herdr >/dev/null; then act "herdr integration install claude"
+  # herdr writes its SessionStart entry unwrapped; the settings call below wraps it (a dry run cannot see it yet).
+  if [ "$DRY" = 1 ] && ! command -v herdr >/dev/null; then act "herdr integration install claude"; act "settings.json: wrap SessionStart herdr-agent-state.sh"
   elif ! herdr integration status 2>/dev/null | grep -q '^claude: current'; then
     act "herdr integration install claude"
     if [ "$DRY" = 0 ]; then
       bk "$SETTINGS"; [ -e "$SETTINGS" ] || rec herdr newfile "$SETTINGS"
       herdr integration install claude >/dev/null && rec herdr integration claude
-    fi
+    else act "settings.json: wrap SessionStart herdr-agent-state.sh"; fi
   fi
   putmany herdr "$REPO/herdr" "$HOME/bin" 755 h cr hr claude_session_transcript.sh herdr_session_manage.sh herdr_session_record_live.sh \
     herdr_session_resolve_tab.py herdr_session_restore.py herdr_session_restart_and_restore.py herdr_session_snapshot.sh claude_exit_session.sh
   put herdr "$REPO/herdr/record-herdr-tab.sh" "$HOME/.claude/hooks/record-herdr-tab.sh" 755
+  put herdr "$REPO/herdr/skip-if-nested-claude.sh" "$HOME/.claude/hooks/skip-if-nested-claude.sh" 755
   put herdr "$REPO/herdr/prompt-suggestion-misread-guard.py" "$HOME/.claude/hooks/prompt-suggestion-misread-guard.py" 644
   path_line
   local bp=${BREWP:-/opt/homebrew}
@@ -603,6 +628,8 @@ c_herdr() {
 </plist>"
   settings herdr add <<EOF
 hook${T}SessionStart${T}${T}~/.claude/hooks/record-herdr-tab.sh${T}
+wrap${T}SessionStart${T}record-herdr-tab.sh
+wrap${T}SessionStart${T}herdr-agent-state.sh
 hook${T}PreToolUse${T}Bash${T}python3 ~/.claude/hooks/prompt-suggestion-misread-guard.py${T}5
 allow${T}Bash(claude_exit_session.sh:*)
 EOF
@@ -1137,6 +1164,7 @@ $a" ;;
           statusline) printf 'statusline\t%s\n' "$ev" | settings "$p" remove ;;
           outputstyle) printf 'outputstyle\t%s\n' "$ev" | settings "$p" remove ;;
           key) printf 'key\t%s\t%s\n' "$ev" "$m" | settings "$p" remove ;;
+          wrap) printf 'wrap\t%s\t%s\n' "$ev" "$m" | settings "$p" remove ;;
         esac ;;
       agent)
         local f="$LA/$a.plist"

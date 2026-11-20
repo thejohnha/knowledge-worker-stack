@@ -71,7 +71,7 @@ It acts only in the first 10 minutes after the herdr server starts, so a grid yo
 | `●` green | done, not looked at yet (waiting for you) |
 | `○` green | idle (waiting for you) |
 | `●` red | blocked on a question |
-| `◌` blue | tab open, session not running; Enter resumes it in that tab |
+| `◌` blue | tab open, session not running; Enter resumes it in that tab. A session has one cell: where it runs, else the tab that recorded it last; an older tab that held it shows as a plain shell |
 | `P` blue | parked: no tab; Enter brings it back |
 | `◷` blue | parked, and the comms manager will reopen it when the message it waits for arrives (only with [comms](../../comms/) installed) |
 | `◐` | resuming, still starting up |
@@ -151,4 +151,4 @@ Archived sessions stay in the archive folder.
 - After a bring-back from the archive fails to create its workspace, the archived side still lists the session until you press `R`.
 - `--demo` needs herdr running; without it the grid exits with "herdr is not running".
 
-Tested on macOS 26 with Python 3.9, against a sandbox (a throwaway home folder and a stand-in for herdr): drawing, `--demo` (writes nothing), cell placement with and without `categories`, bookmarks, views, help, `t` rename (refused while a member runs; renames live and archived members, keeps dates and numbers, updates the title files), `a` archive and bring-back into the right project folder, `d` delete (refused while a member runs) with a stand-in Trash, `claude_session_lineage_delete_or_archive.py` (`--check`, delete, archive into an existing and a new folder, cells dropped across workspaces, refused while a member runs, canceled), and `ensure`. Not tested here: anything against a real herdr server (going to the grid, resuming, `n`, `p`, moving cells, `=`), the real Trash, the `ensure` LaunchAgent under launchd, and pressing ctrl+alt+g (the step that writes it was run twice against a throwaway config: one block, absolute paths).
+Tested on macOS 26 with Python 3.9, against a sandbox (a throwaway home folder and a stand-in for herdr): drawing, `--demo` (writes nothing), cell placement with and without `categories`, bookmarks, views, help, `t` rename (refused while a member runs; renames live and archived members, keeps dates and numbers, updates the title files), `a` archive and bring-back into the right project folder, `d` delete (refused while a member runs) with a stand-in Trash, `claude_session_lineage_delete_or_archive.py` (`--check`, delete, archive into an existing and a new folder, cells dropped across workspaces, refused while a member runs, canceled), one cell per session when a bare tab and a newer tab both name it, and `ensure`. Not tested here: anything against a real herdr server (going to the grid, resuming, `n`, `p`, moving cells, `=`), the real Trash, the `ensure` LaunchAgent under launchd, and pressing ctrl+alt+g (the step that writes it was run twice against a throwaway config: one block, absolute paths).

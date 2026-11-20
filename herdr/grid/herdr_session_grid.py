@@ -615,6 +615,9 @@ class Grid:
                 for c in e2["cells"]:
                     if c.get("tab") is None and (c.get("uuid") == uuid or (key and c.get("key") == key)): return w2, c
             return None, None
+        mem = self.remembered()                                  # tab -> the session it last held, stale claims dropped
+        claimed = {u for u, _ in self.agents.values()} | set(mem.values())
+        stale = {}                                               # uuid -> (row, the cell that claimed it stale)
         for w, label in self.ws:                                 # 2. every live tab has a cell
             # 2a. a reopened workspace takes over its CLOSED row of the same label: the row's position and
             # parked cells stay, under the new id. Live-vs-live twins are left alone: both can be real.
@@ -625,7 +628,7 @@ class Grid:
             # parked in that row; until one arrives it waits.
             here = set()
             for tab, _ in self.tabs.get(w, []):
-                u = self.agents.get(tab, ("", ""))[0] or ((self.tabstore.get(tab) or {}).get("uuid") if isinstance(self.tabstore.get(tab), dict) else "")
+                u = self.agents.get(tab, ("", ""))[0] or mem.get(tab, "")
                 if u: here.add(lineage_key(title_of(u, self.titles), u))
             for w2 in [x for x, e2 in W.items() if x != w and x not in live_ws and (e2.get("label") or "") == (label or "")
                        and here & {c.get("key") for c in e2["cells"] if c.get("key")}]:
@@ -638,9 +641,7 @@ class Grid:
             cells = ent["cells"]
             for tab, tlabel in self.tabs.get(w, []):
                 uuid, _ = self.agents.get(tab, ("", ""))
-                if not uuid:                                     # no agent: the tab store says what it last held
-                    row = self.tabstore.get(tab) or {}
-                    uuid = row.get("uuid") or "" if isinstance(row, dict) else ""
+                if not uuid: uuid = mem.get(tab, "")             # no agent: the tab store says what it last held
                 key = lineage_key(title_of(uuid, self.titles), uuid) if uuid else ""
                 cell = next((c for c in cells if c.get("tab") == tab), None)
                 if cell is None:                                 # a parked twin is absorbed in step 3
@@ -648,6 +649,12 @@ class Grid:
                 cell["tab"] = tab
                 if tlabel: cell["label"] = tlabel
                 if uuid: cell["uuid"], cell["key"] = uuid, key
+                elif cell.get("uuid") and cell["uuid"] in claimed:   # its session is live, or last held, in another tab
+                    stale[cell["uuid"]] = (w, cell); cell["uuid"] = cell["key"] = ""
+        for u, (w, sc) in stale.items():                         # 2b. the tab now holding it takes the stale cell's slot
+            cells = W[w]["cells"]
+            c = next((c for c in cells if c is not sc and c.get("uuid") == u), None)
+            if c: cells.remove(c); cells.insert(cells.index(sc), c)
         for w, ent in W.items():                                 # 3. one cell per lineage: a live cell absorbs any
             for c in list(ent["cells"]):                         #    parked twin, taking its slot when in the same row
                 if not (c.get("tab") and c.get("uuid")): continue
@@ -675,6 +682,21 @@ class Grid:
         order += [w for w in W if w not in order]
         self.st["order"] = order
         self.clamp()
+
+    def remembered(self):
+        """tab -> the session a tab with no live agent last held, per the tab store. A session belongs to ONE
+        tab: where it runs now, else the tab that recorded it last. Resuming into a new tab left the old bare
+        shell tab still naming the session, and the grid drew one session as two cells."""
+        live = {u for u, _ in self.agents.values()}
+        best = {}
+        for t in {t for ts in self.tabs.values() for t, _ in ts} - set(self.agents):
+            row = self.tabstore.get(t)
+            u = row.get("uuid") if isinstance(row, dict) else ""
+            if not u or u in live: continue
+            try: at = time.mktime(time.strptime(row.get("captured_at", "")[:19], "%Y-%m-%dT%H:%M:%S"))
+            except Exception: at = 0
+            if u not in best or at > best[u][0]: best[u] = (at, t)
+        return {t: u for u, (_, t) in best.items()}
 
     def adopt(self, W):
         """3c. Every lineage with a titled transcript on disk has a cell, parked when it has no tab, so one last

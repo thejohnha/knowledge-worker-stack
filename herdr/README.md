@@ -21,6 +21,7 @@ The grid (`grid/`) builds on this folder; set this one up first.
 | `claude_session_transcript.sh` | `~/bin` | finds a session's transcript in any project folder of any account; `cr`, `hr` and the herdr session manager share it |
 | `herdr_session_manage.sh` | `~/bin` | the herdr session manager |
 | `record-herdr-tab.sh` | `~/.claude/hooks` | SessionStart hook: writes down which tab each session started in |
+| `skip-if-nested-claude.sh` | `~/.claude/hooks` | runs a SessionStart hook unless a claude started this claude, so a nested `claude -p` cannot claim the pane (step 5) |
 | `prompt-suggestion-misread-guard.py` | `~/.claude/hooks` | Bash hook: stops a session misreading or typing over another session's input box (step 8) |
 | `herdr_session_record_live.sh` | `~/bin` | every minute: which sessions are running, and fixes the tab record when a tab moves |
 | `herdr_session_resolve_tab.py` | `~/bin` | tab id -> session; reads files only, so it works while herdr's command line is refusing |
@@ -58,7 +59,7 @@ mkdir -p ~/bin ~/.claude/hooks
 install -m 755 h cr hr claude_session_transcript.sh herdr_session_manage.sh herdr_session_record_live.sh \
   herdr_session_resolve_tab.py herdr_session_restore.py herdr_session_restart_and_restore.py \
   herdr_session_snapshot.sh claude_exit_session.sh ~/bin/
-install -m 755 record-herdr-tab.sh ~/.claude/hooks/
+install -m 755 record-herdr-tab.sh skip-if-nested-claude.sh ~/.claude/hooks/
 grep -q 'HOME/bin' ~/.zshrc 2>/dev/null || echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zshrc    # then open a new terminal
 ```
 - Quit and reopen the terminal and Claude Code once install is done, so both see `~/bin` on PATH. Until then, call a script as `~/bin/<name>`.
@@ -98,11 +99,14 @@ Merge this into `~/.claude/settings.json` (keep everything already there, includ
 {
   "hooks": {
     "SessionStart": [
-      { "hooks": [ { "type": "command", "command": "~/.claude/hooks/record-herdr-tab.sh" } ] }
+      { "hooks": [ { "type": "command", "command": "bash ~/.claude/hooks/skip-if-nested-claude.sh ~/.claude/hooks/record-herdr-tab.sh" } ] }
     ]
   }
 }
 ```
+In the same file, put `bash ~/.claude/hooks/skip-if-nested-claude.sh ` in front of the command of herdr's own entry (the one running `herdr-agent-state.sh`).
+- Why: a `claude -p` that a session runs from its Bash tool inherits the pane's `HERDR_PANE_ID` and `HERDR_TAB_ID`, and its SessionStart hooks would report it as the pane's session, so herdr, the tab record and the grid would name a throwaway run. The wrapper skips the hook when two or more `claude` processes are above it.
+- Every `herdr integration install claude` (a herdr upgrade too) adds its entry again, unwrapped, beside the wrapped one: delete the new one. `./install.sh` does both edits, and redoes them on each run.
 Then the once-a-minute recorder and the hourly backup, as two LaunchAgents (launchd rather than cron so the backup's failure notification can reach your screen):
 ```bash
 for job in record-live:herdr_session_record_live.sh:60 snapshot:herdr_session_snapshot.sh:3600; do
@@ -340,9 +344,10 @@ for j in snapshot record-live server; do launchctl bootout gui/$(id -u)/local.he
 cd ~/bin && rm -f h cr hr claude_session_transcript.sh herdr_session_manage.sh herdr_session_record_live.sh \
   herdr_session_resolve_tab.py herdr_session_restore.py herdr_session_restart_and_restore.py \
   herdr_session_snapshot.sh claude_exit_session.sh
-rm ~/.claude/hooks/record-herdr-tab.sh ~/.claude/hooks/prompt-suggestion-misread-guard.py
+rm ~/.claude/hooks/record-herdr-tab.sh ~/.claude/hooks/skip-if-nested-claude.sh ~/.claude/hooks/prompt-suggestion-misread-guard.py
 herdr integration uninstall claude 2>/dev/null
 ```
+- First take `bash ~/.claude/hooks/skip-if-nested-claude.sh ` back off herdr's entry in `~/.claude/settings.json`: `herdr integration uninstall` removes only its entry as it wrote it.
 - Remove the step 5 and step 8 hook entries (and any step 6 rules) from `~/.claude/settings.json` by hand.
 - Optional: `rm ~/.claude/state/state_claude_session_herdr_tabs.json ~/.claude/state/state_claude_herdr_live_sessions.json ~/.claude/state/state_claude_session_last_herdr_pane.json ~/.claude/state/state_claude_session_last_herdr_pane.json.lock`, `rm -r ~/knowledge-worker-stack-backups/herdr ~/.local/state/herdr-snapshot`, `rm -f ~/Library/Logs/knowledge-worker-stack/herdr_*.log`, `brew uninstall herdr` and `rm -r ~/.config/herdr`.
 
@@ -353,5 +358,6 @@ herdr integration uninstall claude 2>/dev/null
 - Titles shown by `hr` and the restore come from the date-prefix title hook in `../claude-code/`; without it they show the session id or the tab label.
 - `herdr_session_restart_and_restore.py` restarts through the `local.herdr.server` LaunchAgent; set `HERDR_LAUNCH_AGENT` if yours is named differently.
 - The herdr session manager types into panes, so it needs each pane's shell to be at a prompt; a pane running something else is refused, not interrupted.
+- `skip-if-nested-claude.sh` counts processes that `ps` names `claude`; where Claude Code runs under another name (`node`), nothing counts as nested and the hooks run as before.
 
-Tested on macOS 26 with herdr 0.9.5 and the system bash 3.2, against a private herdr server on its own socket and a throwaway home folder, with a stand-in for `claude`: `cr` (accounts, title, folder, the already-open refusal both ways), `hr` (lookup, the rename refusal, `--force`, no record), the tab hook, the recorder (including silence with herdr down), the tab-move catch-up, restore (live set, `--list`, `--from`, the skips, an actual resume typed into a bare tab), the herdr session manager's `start` (every flag, passed through to the stand-in), `goto`, `move` (whole tab, to a new workspace, `this`), `draft`, and its refusals, the backup (first run, no change, a repaired family, a failure, the prune), and the alert routing (shared poster, its fallback, no poster) with stand-ins, `--help` and unknown-flag refusals on every script that takes arguments, the input-box guard with sample hook input and a stand-in herdr and session manager (plain-text reads refused, ANSI reads and the marker passing, a send refused into a draft and into a blocked target, passed into an empty box, and passed with a warning when herdr does not answer), and the key-binding block (written with absolute paths, `reload-config` applied with no diagnostics; the keys were not pressed). Not tested: `start`, `resume`, `quit` and `tell` against a real Claude Code session; the real restart in `herdr_session_restart_and_restore.py`; the three LaunchAgents; `claude_exit_session.sh` past its checks; panes running zsh.
+Tested on macOS 26 with herdr 0.9.5 and the system bash 3.2, against a private herdr server on its own socket and a throwaway home folder, with a stand-in for `claude`: `cr` (accounts, title, folder, the already-open refusal both ways), `hr` (lookup, the rename refusal, `--force`, no record), the tab hook, `skip-if-nested-claude.sh` under 0 to 3 processes named `claude` and with `ps` failing, the installer wrapping herdr's entry (a second run, herdr re-adding it, uninstall), the recorder (including silence with herdr down), the tab-move catch-up, restore (live set, `--list`, `--from`, the skips, an actual resume typed into a bare tab), the herdr session manager's `start` (every flag, passed through to the stand-in), `goto`, `move` (whole tab, to a new workspace, `this`), `draft`, and its refusals, the backup (first run, no change, a repaired family, a failure, the prune), and the alert routing (shared poster, its fallback, no poster) with stand-ins, `--help` and unknown-flag refusals on every script that takes arguments, the input-box guard with sample hook input and a stand-in herdr and session manager (plain-text reads refused, ANSI reads and the marker passing, a send refused into a draft and into a blocked target, passed into an empty box, and passed with a warning when herdr does not answer), and the key-binding block (written with absolute paths, `reload-config` applied with no diagnostics; the keys were not pressed). Not tested: `start`, `resume`, `quit` and `tell` against a real Claude Code session; the real restart in `herdr_session_restart_and_restore.py`; the three LaunchAgents; `claude_exit_session.sh` past its checks; panes running zsh.
