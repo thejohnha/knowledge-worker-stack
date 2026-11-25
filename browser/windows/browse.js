@@ -2046,9 +2046,7 @@ async function rawEnterText(tcdp, target, text) {
           if (!leftover) break;
         }
         if (leftover) throw new Error('could not clear the pre-filled field before typing — after select-all + '
-          + 'Delete (twice) it still holds '
-          + (p.secret ? 'a value (password/autofilled field: not shown)' : JSON.stringify(String(leftover).slice(0, 80)))
-          + ': ' + NAME
+          + 'Delete (twice) it still holds a value: ' + NAME
           + ' (a page handler is rewriting the value; typing into it would append, not replace)');
       }
       if (await fieldWantsKeystrokes(tcdp, T, deadline)) {  // failure (2): key-handler widgets get real keys
@@ -2080,9 +2078,8 @@ async function rawEnterText(tcdp, target, text) {
     after = await readValue();
   }
   if (landedNothing(after))
-    throw new Error('value did not land — field '
-      + (p.secret ? (after ? 'holds a value' : 'is empty') + ' (password/autofilled field: values not shown)'
-                  : 'holds ' + JSON.stringify(after) + ' after typing ' + JSON.stringify(text))
+    // Neither value nor length: the field may be a card or another secret field not typed password.
+    throw new Error('value did not land — the field is ' + (after == null ? 'unreadable' : after === '' ? 'still empty' : 'unchanged') + ' after typing'
       + (typedAs === 'insert-text' || !text ? '' : ' (insertText and per-character keystrokes both tried)')
       + ' (an autocomplete/validation handler is probably swallowing it — click the field first so its handler '
       + 'arms, then re-enter)');
@@ -4612,8 +4609,8 @@ async function runRaw() {
           // password or autofilled field, where even the length is withheld.
           // typed/cleared are value-free diagnostics (see rawEnterText's failure modes): typed says which
           // input pipeline delivered it, cleared says a pre-filled value was wiped (and proven wiped) first.
-          const o = { filled: sel, ...(refTarget ? { ref: refTarget.ref } : {}), raw: true,
-                      ...(r.secret ? { landed: r.value.length > 0, withheld: 'password-or-autofill' } : { length: r.value.length }),
+          const o = { filled: sel, ...(refTarget ? { ref: refTarget.ref } : {}), raw: true, landed: r.value.length > 0,
+                      ...(r.secret ? { withheld: 'password-or-autofill' } : {}),
                       differs: r.differs, typed: r.typed, cleared: r.cleared };
           if (flags.echoValue && !r.secret) o.value = r.value;
           out(o);
@@ -4724,8 +4721,8 @@ async function runRaw() {
                 var u=__bq(${JSON.stringify(reg.username)}), p=__bq(${JSON.stringify(reg.password)});
                 [u,p].forEach(function(el){ if(el&&typeof el.value==='string'&&el.value.length){
                   el.value=''; el.dispatchEvent(new Event('input',{bubbles:true})); } });
-                return JSON.stringify({u:u&&typeof u.value==='string'?u.value.length:null,
-                                       p:p&&typeof p.value==='string'?p.value.length:null});})()`, remaining(deadline));
+                return JSON.stringify({u:u&&typeof u.value==='string'?u.value.length>0:null,
+                                       p:p&&typeof p.value==='string'?p.value.length>0:null});})()`, remaining(deadline));
               try { return JSON.parse(String(r.value)); } catch (_) { return null; }
             };
             const pickerUp = () => {
@@ -4735,7 +4732,7 @@ async function runRaw() {
             let sawPicker = false, cl = null;
             for (let attempt = 1; attempt <= LOGIN_PICKER_TRIES && !sawPicker; attempt++) {
               cl = await clearFields();
-              if (!cl || cl.u !== 0 || cl.p !== 0) {          // still holding a value ⇒ let the fill finish, retry
+              if (!cl || cl.u !== false || cl.p !== false) {  // still holding a value ⇒ let the fill finish, retry
                 await new Promise((res) => setTimeout(res, 600));
                 continue;
               }
@@ -4756,9 +4753,9 @@ async function runRaw() {
               throw new Error(loginErr(site, 'CHOOSER', 'the account picker never appeared after '
                 + LOGIN_PICKER_TRIES + ' attempts to raise it (clear both fields, click "' + reg.username
                 + '", wait) within ' + LOGIN_PICKER_MS + 'ms total — so there was no row to name and nothing '
-                + 'was submitted. Field lengths at the last attempt: ' + JSON.stringify(cl) + ', and now: '
-                + JSON.stringify(end) + '. A non-zero username length there means Chromium keeps refilling the '
-                + 'field faster than it can be cleared; zeros mean the picker itself is not being published — '
+                + 'was submitted. Fields still holding a value at the last attempt: ' + JSON.stringify(cl) + ', and now: '
+                + JSON.stringify(end) + '. A username still true there means Chromium keeps refilling the '
+                + 'field faster than it can be cleared; false for both means the picker itself is not being published — '
                 + 'either this realm holds only ONE saved row (drop --account and let the ordinary pre-gesture '
                 + 'path fill it) or the browser is publishing no accessibility tree to read it out of'));
             }
