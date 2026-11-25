@@ -144,7 +144,7 @@ const flags = { account: null, new: false, out: null, agents: false, stale: fals
                 echoValue: false, noPreflight: false, rawUrls: false, button: null, list: false, resolve: false,
                 username: null, card: null, stayFront: false, ref: null, expect: null, expectMs: null, noEffect: false,
                 force: false, wait: null, noWait: false, noRecheck: false, noActivateRetry: false, frame: null,
-                target: null, anySession: false };
+                target: null, anySession: false, noAutoPrint: false };
 const pos = [];
 const needVal = (name, v) => (v === undefined ? die(name + ' needs a value') : v);
 for (let i = 0; i < rawArgs.length; i++) {
@@ -258,6 +258,10 @@ for (let i = 0; i < rawArgs.length; i++) {
     + 'CDP is the only path every verb takes). Drop the flag. For a target a CSS '
     + 'selector cannot name, use `browse snapshot` and aim with --ref <n>; to reach inside an iframe, --frame '
     + '<iframe selector>');
+  // open-url: stub window.print in the page BEFORE its scripts run. A page that prints itself on load (a
+  // print view) opens Chromium's print preview, and while that is open Page.printToPDF fails with "Page is
+  // already being printed", so print2pdf could never capture exactly the pages built for printing.
+  else if (a === '--no-auto-print') flags.noAutoPrint = true;
   else if (a.startsWith('--')) die('unknown flag: ' + a + ' (pass `--` before a literal --argument)'); // fail loud, never a silent positional
   else pos.push(a);
 }
@@ -3776,6 +3780,9 @@ const captureDest = (posArg, fallback) => outFile(flags.out && flags.out !== '-'
     die('--list is a login flag (it names every site enrolled in the browser\'s saved-password store); no other verb takes it');
   if (flags.resolve && verb !== 'login-state')
     die('--resolve is a login-state flag (it spends ONE trusted click to settle an UNRESOLVED verdict); no other verb takes it');
+  if (flags.noAutoPrint && verb !== 'open-url')
+    die('--no-auto-print is an open-url flag (it stubs window.print in the page it loads, so print2pdf can '
+      + 'capture a page that prints itself); no other verb takes it');
   if (flags.stayFront && verb !== 'screenshot')
     die('--stay-front is a screenshot flag (it leaves the captured tab in the foreground instead of handing the '
       + 'foreground back to whichever tab had it); no other verb takes it. save-page and dismiss-dialog also '
@@ -4379,6 +4386,10 @@ async function runRaw() {
 
         case 'open-url': {
           const url = pos[0]; if (!url) die('open-url needs <url>');
+          // Registered on this call's CDP session only, so it covers the document this navigation loads (the
+          // stub is a property of that document and outlives the call) and dies with the connection after.
+          if (flags.noAutoPrint)
+            await tcdp.send('Page.addScriptToEvaluateOnNewDocument', { source: 'window.print = function () {};' });
           const r = await rawGoto(tcdp, url);
           out({ url: redactUrl(r.url), title: r.title, status: r.status });
           break;

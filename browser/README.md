@@ -20,7 +20,7 @@
 
 ## Verbs
 ### Look
-- `open-url <url>`: navigate and wait for load. Returns `{url,title,status}`. Check the content too; a sign-in page can return 200. Refuses browser-internal pages (`chrome://`, `edge://`, `devtools://`, `view-source:`, `javascript:`, `about:` other than `about:blank`), which show saved passwords and settings.
+- `open-url <url>`: navigate and wait for load. Returns `{url,title,status}`. Check the content too; a sign-in page can return 200. Refuses browser-internal pages (`chrome://`, `edge://`, `devtools://`, `view-source:`, `javascript:`, `about:` other than `about:blank`), which show saved passwords and settings. `--no-auto-print` stubs the page's `window.print` before its scripts run, so `print2pdf` can capture a page that prints itself on load.
 - `get-text [selector]`: visible text of the page or of one element.
 - `get-html [selector]`: raw HTML of the page or of one element.
 - `get-values <sel[==expected]>…`: live field values. Exits non-zero on a mismatch. Password and autofilled fields are withheld.
