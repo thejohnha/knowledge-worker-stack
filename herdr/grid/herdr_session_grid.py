@@ -13,7 +13,7 @@ session if missing, relaunches the grid there if the pane is back at a shell, an
 `herdr_session_grid.py run --demo` — every name replaced by a placeholder, nothing written: a screenshot you can share.
 `herdr_session_grid.py ensure` — from a LaunchAgent every minute: starts the grid in its pane after a herdr restart.
 """
-import curses, hashlib, json, locale, os, re, socket, subprocess, sys, tempfile, time, fcntl, unicodedata
+import calendar, curses, hashlib, json, locale, os, re, socket, subprocess, sys, tempfile, time, fcntl, unicodedata
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import herdr_session_bookmarks as BM                          # bookmarks live in the grid file's "bookmarks" section
 
@@ -449,6 +449,33 @@ def ctx_of(path):
                 val = (u.get("input_tokens") or 0) + (u.get("cache_read_input_tokens") or 0) + (u.get("cache_creation_input_tokens") or 0); break
     except OSError: pass
     _CTX.clear(); _CTX[k] = val; return val
+
+_RECAP = {}
+def recap_of(path):
+    """(text, when, stale) of Claude Code's latest idle recap (its 'away_summary' record, written by a small model
+    when a session sits idle); stale once something has been typed after it. ("", 0, False) when the transcript
+    has none. Reads the tail only; cached by mtime."""
+    try: mt = os.path.getmtime(path)
+    except OSError: return ("", 0, False)
+    k = (path, mt)
+    if k in _RECAP: return _RECAP[k]
+    val, stale = ("", 0, False), False
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(max(0, os.path.getsize(path) - 2_000_000)); tail = fh.read().decode("utf-8", "replace")
+        for line in reversed(tail.splitlines()):
+            if '"away_summary"' not in line and '"user"' not in line: continue
+            try: r = json.loads(line)
+            except Exception: continue
+            if r.get("subtype") == "away_summary":
+                try: ts = calendar.timegm(time.strptime(r["timestamp"][:19], "%Y-%m-%dT%H:%M:%S"))   # the record's time is UTC
+                except Exception: ts = 0
+                val = (re.sub(r"\s*\(disable recaps in /config\)\s*$", "", r.get("content") or ""), ts, stale); break
+            m = r.get("message") or {}
+            if r.get("type") == "user" and not r.get("isMeta") and (isinstance(m.get("content"), str)
+                    or any(b.get("type") == "text" for b in m.get("content") or [] if isinstance(b, dict))): stale = True   # typed after it
+    except OSError: pass
+    _RECAP.clear(); _RECAP[k] = val; return val
 
 def fmt_tokens(n):
     return f"{n/1_000_000:.1f}M".replace(".0M", "M") if n >= 1_000_000 else f"{n/1000:.0f}k" if n >= 1000 else str(n)
@@ -965,7 +992,7 @@ class Grid:
     # The resume runs in the BACKGROUND and the grid keeps its keys: it is 10-30 s of Claude booting, and the
     # grid used to sit frozen for all of it. Deliberately no goto when it lands: wake several, then jump.
     def busy(self, c):
-        return bool(c and c.get("uuid") and any(c["uuid"] in (j["cell"], j["uuid"]) for j in self.jobs))
+        return bool(c and c.get("uuid") and any(c["uuid"] in (j["cell"], j["uuid"]) for j in self.jobs if not j.get("live")))   # a send to a running session is not a resume
 
     def resume_bg(self, c, uuid, label, w, root_tab, args):
         out = tempfile.TemporaryFile("w+")                       # a file, not a pipe: a failure prints the pane's last 12 lines
@@ -974,21 +1001,52 @@ class Grid:
         self.jobs.append({"proc": p, "out": out, "cell": c["uuid"], "uuid": uuid, "label": label, "w": w, "root_tab": root_tab, "t0": time.time()})
         self.msg = f"resuming {label} in the background — keys stay live; Enter again once it shows ●"
 
+    def send(self, scr):
+        """Space: type a prompt for the cursor's session and send it without leaving the grid. The manager's `tell`
+        does it in the background: it pastes the prompt and presses Enter (a working session queues it and reads it at
+        its next step), refuses one blocked on a question, lifts an unsent draft out of its box and puts it back, resumes a
+        stopped or parked one first, and proves the arrival off the session's transcript."""
+        c = self.cur(); w = self.rows()[self.row][0] if self.rows() else ""
+        if not c or not c.get("uuid") or c.get("archived"): self.msg = "Space sends to a session — not to a shell tab or an archived cell"; return
+        if DEMO: self.msg = "demo: nothing sent"; return
+        st = self.status(c); label = c.get("label") or c["uuid"][:8]
+        if st == "blocked": self.msg = f"{label} is asking you something — answer it in its tab first; nothing sent"; return
+        if any(c["uuid"] in (j["cell"], j["uuid"]) for j in self.jobs): self.msg = f"{label} is still resuming or taking your last send — try again once that lands"; return
+        if not c.get("tab") and w not in {x for x, _ in self.ws}: self.msg = f"{label}'s workspace is closed — Enter first to rebuild it, then Space"; return
+        text = prompt(scr, f"send to {label}:")
+        if not text: self.msg = "cancelled — nothing sent"; return
+        live = bool(c.get("tab")) and st != "stopped"
+        if live: uuid, args = c["uuid"], ["--no-resume"]
+        else:
+            uuid = newest_member(c["uuid"], self.titles)
+            args = (["--pane", self.panes.get(c["tab"], "")] if c.get("tab")   # stopped: resume in the tab it already has
+                    else ["--workspace", w, "--label", c.get("label") or (lineage_key(title_of(uuid, self.titles), uuid) or "session"), "--new-tab"])
+        out = tempfile.TemporaryFile("w+")
+        try: p = subprocess.Popen([MANAGE, "tell", uuid, text, *args], stdout=out, stderr=subprocess.STDOUT, text=True)
+        except FileNotFoundError: out.close(); self.msg = f"{MANAGE} is not on PATH — install the herdr session manager"; return
+        self.jobs.append({"proc": p, "out": out, "cell": c["uuid"], "uuid": uuid, "label": label, "w": "" if live else w, "root_tab": "",
+                          "t0": time.time(), "kind": "tell", "live": live, "limit": 600})   # tell: up to 5 min for another send to the pane, a resume, 30 s of proof
+        self.msg = f"sending to {label}" + (" — queued behind its running turn" if st == "working" else "" if live else " — resuming it first") + " · keys stay live"
+
     def poll_jobs(self):
-        """Finish every resume that has exited: what open() used to do after its blocking wait. True if any did."""
-        done = [j for j in self.jobs if j["proc"].poll() is not None or time.time() - j["t0"] > 180]
+        """Finish every resume or send that has exited: what open() used to do after its blocking wait. True if any did."""
+        done = [j for j in self.jobs if j["proc"].poll() is not None or time.time() - j["t0"] > j.get("limit", 180)]
         if not done: return False
         msgs, landed = [], set()
         for j in done:
             self.jobs.remove(j)
-            if j["proc"].poll() is None: j["proc"].kill(); j["proc"].wait(); j["out"].close(); msgs.append(f"{j['label']}: resume timed out after 180 s"); continue
+            if j["proc"].poll() is None:
+                j["proc"].kill(); j["proc"].wait(); j["out"].close()
+                msgs.append(f"{j['label']}: " + ("the send did not finish in 10 min — look in its tab before resending" if j.get("kind") == "tell" else "resume timed out after 180 s")); continue
             j["out"].seek(0); text = j["out"].read(); j["out"].close()
+            if j.get("kind") == "tell" and j["proc"].returncode == 3: msgs.append(f"queued in {j['label']} — it reads it at its next step" if "queued intact" in text else f"sent to {j['label']} but not yet confirmed — look in its tab before resending"); continue
             if j["proc"].returncode != 0: msgs.append(f"{j['label']}: " + last_line(text)); continue
+            if j.get("kind") == "tell" and "resumed=yes" not in text: msgs.append(f"sent to {j['label']}"); continue
             if j["root_tab"]: herdr("tab", "rename", j["root_tab"], j["label"])
             for ent in self.st["workspaces"].values():           # the newest member's uuid, so reconcile re-attaches
                 for c in ent["cells"]:                           # the parked cell in its own slot
                     if c.get("uuid") == j["cell"]: c["uuid"] = j["uuid"]
-            msgs.append(f"resumed {j['label']} — Enter again to go there"); landed.add(j["w"])
+            msgs.append(f"{'sent to' if j.get('kind') == 'tell' else 'resumed'} {j['label']} — Enter again to go there"); landed.add(j["w"])
         self.refresh()
         for w in landed - {""}: self.apply_order(w)
         save_state(self.st); self.msg = " · ".join(msgs)
@@ -1244,13 +1302,15 @@ def detail_lines(g, c, width):
         lines.append((segs, "segments"))                          # status in its color, pane plain, id dim — like the statusline
         if not DEMO: lines += [(l, "title") for w in g.waits(c) for l in wrap("◷ waiting: " + w, width)]
         p = transcript(c.get("uuid", "")) if uuid else None
+        r, rts, stale = recap_of(p) if p and not DEMO else ("", 0, False)   # Claude Code's own idle summary; dimmed and dated once typed past
+        if r: lines += [("", "")] + [(l, "dim" if stale else "body") for l in wrap((f"※ recap as of {when(rts).split(' · ')[1]}, before your last message: " if stale else "※ recap: ") + r, width)] + [("", "")]
         if p:
             sz = os.path.getsize(p) / 1048576; segs = [(f"{sz:.1f} MB", "size")]   # the statusline's cornflower blue
             n = ctx_of(p)
             if n is not None: segs += [(" · Cx ", "dim"), (fmt_tokens(n), ctx_kind(n))]
             lines += [(segs, "segments"), (f"last activity {when(os.path.getmtime(p))}", "dim")]
         pdv = lin.get("prime_directive") or ""; dw = lin.get("done_when") or ""
-        if pdv: lines += [("", "")] + [(l, "body") for l in wrap(pdv, width)]   # no prime directive: the title above is the description
+        if pdv: lines += [("", "")] + [(l, "body") for l in wrap("prime directive: " + pdv, width)]   # no prime directive: the title above is the description
         if dw: lines += [("", "")] + [(l, "dim") for l in wrap("done when: " + dw, width)]
     else:
         lines += [("shell tab, no session", "dim"), (f"{c.get('tab')} · {pane}", "dim")]
@@ -1259,7 +1319,7 @@ def detail_lines(g, c, width):
 def draw(scr, g):
     scr.erase(); H, W = scr.getmaxyx()
     legend = [(" ● working", 2), ("  ● done", 1), ("  ○ idle", 1), ("  ● blocked", 3), ("  ◌ stopped", 4), ("  P parked", 4)] + ([("  ◷ parked, waiting for a message", 4)] if os.path.isdir(WAKES) else []) + [("  ◐ resuming", 2), ("  · shell", 5), ("  A archived", 4), ("  ★☆ bookmarked", 5)]
-    keys = "⏎ open  n new  b bookmark  ⇥ next ★  p park  x forget  d delete  a archive  m grab  v view  o order  / search  A archived  ↑↓←→ move  r label  t title  = push order  R refresh  ? help  q quit  ctrl+alt+g back here from any tab"
+    keys = "⏎ open  ␣ send  n new  b bookmark  ⇥ next ★  p park  x forget  d delete  a archive  m grab  v view  o order  / search  A archived  ↑↓←→ move  r label  t title  = push order  R refresh  ? help  q quit  ctrl+alt+g back here from any tab"
     # Legend then keys, wrapped onto as many lines as the pane needs: a narrow pane used to cut the keys off at its right edge.
     foot = [[]]; x = 0
     for txt, cp in legend + [("  " + k, 0) for k in keys.split("  ")]:
@@ -1364,6 +1424,7 @@ HELP = [
     ("d",       "delete: a PARKED cell's session and its whole lineage — transcripts to the Trash, cell dropped; refused if any member is still running anywhere   (asks first)"),
     ("a",       "archive: a PARKED cell's whole lineage moves into a folder of the archive — the folder is prefilled with a guess, Tab cycles the existing ones, cell dropped; refused if any member is running. A brings one back   (asks for the folder, then asks first)"),
     ("m",       "grab the cell; arrows carry it along the row or into another workspace; m or Enter drops, Esc cancels"),
+    ("Space",   "send: type a prompt for the cursor's session and Enter sends it; you stay in the grid. A working session queues it and reads it at its next step; a stopped or parked one is resumed first (◐); one asking you a question is refused. Esc cancels"),
     ("r",       "rename the herdr tab label (the current label is loaded to edit; Esc keeps it)"),
     ("t",       "rename the session's TITLE across its whole lineage, archived members too: lists the members, prefills the description, each keeps its own date and number; refused if any member is running"),
     ("n",       "new session in this row's workspace, in the cursor's slot: tab label (required), then a few words for its first prompt (optional). Account follows the cell under the cursor; your words go out as its first prompt and it starts working; title and directive come later, as in any session"),
@@ -1532,6 +1593,7 @@ def main(scr):
         elif k == ord("t"): g.rename_lineage(scr); curses.flushinp()
         elif k == ord("r"): g.rename(prompt(scr, "new tab label:", (g.cur() or {}).get("label") or ""))
         elif k == ord("b"): g.toggle_mark()
+        elif k == ord(" "): g.send(scr); curses.flushinp()
         elif k == ord("n"): g.new_session(scr); curses.flushinp()
         elif k == 9: g.next_marked()                              # Tab
         elif k == ord("="):

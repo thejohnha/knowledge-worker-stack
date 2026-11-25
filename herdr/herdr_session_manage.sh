@@ -21,7 +21,11 @@
 #                                         WORKSPACE: an id, or any unambiguous part of its label)
 #   herdr_session_manage.sh tell <UUID|ID PREFIX|PANE> <message> [--timeout MS] [--no-resume]
 #                                        [--workspace wN] [--label TEXT] [--agent-name NAME]
-#                                        [--exact] [--new-tab] [--now]
+#                                        [--exact] [--new-tab] [--pane PANE] [--now]
+#     tell pastes the message and presses Enter, so a WORKING target queues it for its next step; a
+#     BLOCKED one is refused, checked before pasting and again before Enter. --now presses Ctrl+Enter
+#     instead (taken at once). --timeout is how long to wait for another send to the same pane.
+#     --pane: a stopped target is resumed INTO that pane (its tab is still open).
 #     tell never sends a message that is only `skip`: in the target that is the user's skip-mode command.
 #     tell exit codes: 0 delivered and PROVED off the target's transcript; 1 refused before
 #     sending, or something arrived that is not what was sent; 2 usage; 3 SENT but not confirmed
@@ -186,6 +190,9 @@ if len(rules)<2:
     p=[i for i,l in enumerate(plain[:rules[-1]]) if l.startswith("❯")] if rules else []
     if p and p[-1]>0: rules=[p[-1]-1]+rules
 if len(rules)<2: sys.exit(2)
+# A draft taller than the box scrolls inside it, and Claude Code then writes "↑ 3 more" into the
+# border: the rows above are NOT on screen. Exit 3 so nothing lifts a part as if it were the whole.
+partial=any(re.search(r"[↑↓]\s*\d+\s+more", plain[i]) for i in rules[-2:])
 out=[]
 for r,p in zip(raw[rules[-2]+1:rules[-1]], plain[rules[-2]+1:rules[-1]]):
     if "\x1b[2m" in r: continue                      # dim = the placeholder, never typed text
@@ -193,7 +200,8 @@ for r,p in zip(raw[rules[-2]+1:rules[-1]], plain[rules[-2]+1:rules[-1]]):
     out.append(p.rstrip())
 while out and not out[-1]: out.pop()                 # padding rows below the last typed line
 while out and not out[0]: out.pop(0)
-sys.stdout.write("\n".join(out))'
+sys.stdout.write("\n".join(out))
+sys.exit(3 if partial else 0)'
 }
 
 # Rebuild a draft the way a person types it: the text of a line, then shift+enter for the break.
@@ -951,8 +959,35 @@ wait_ready() {
   case "$st" in idle|done) return 0;; *) return 1;; esac
 }
 
+# <pane> <message> <key> — paste the message, read the status AGAIN, then press <key>: enter queues it
+# behind a running turn, ctrl+enter (--now) delivers it at once. The second read is for a busy target:
+# it can stop on a question while the message goes in, and the key would answer it; or the session can
+# exit, and the key would run the message in the bare shell left behind.
+tell_type_and_submit() {
+  local pane="$1" msg="$2" key="$3" st i
+  # ONE bracketed paste, as herdr agent prompt sends it. Text typed through send-text is split by
+  # Claude Code's paste detection: a long line arrives as its first part wrapped as a paste and the
+  # rest typed after, which reads as an altered message. Inside a paste a newline does not submit.
+  herdr pane send-text "$pane" $'\e[200~'"$msg"$'\e[201~' >/dev/null 2>&1
+  for i in 1 2 3; do st=$(agent_status_of "$pane"); [ -n "$st" ] && break; sleep 0.5; done
+  case "$st" in
+    idle|done|working) ;;
+    *)
+      local cleared=no; pane_clear_box "$pane" && cleared=yes
+      if [ -n "$_TELL_DRAFT_PANE" ]; then          # never type a lifted draft back into a question or a shell
+        _TELL_DRAFT_PANE=""
+        echo "tell: your unsent text was NOT put back in $pane. It was:" >&2
+        printf '%s\n' "$_TELL_DRAFT_TEXT" >&2
+      fi
+      die "tell: $pane turned '${st:-<no live agent>}' while the message was going in — $key was not pressed, and the pasted text was $([ "$cleared" = yes ] && echo cleared || echo 'NOT cleared and may still be in the box'). Look at $pane: a key typed into a question can answer it.";;
+  esac
+  herdr pane send-keys "$pane" "$key" >/dev/null 2>&1
+  # The lifted draft goes back only once the box has emptied, or it would join the message.
+  local w; for w in $(seq 1 25); do [ "$(pane_draft "$pane" 2>/dev/null)" = "" ] && break; sleep 0.2; done
+}
+
 cmd_tell() {
-  local target="" msg="" tmo=300000 ws="" label="" aname="" may_resume=yes exact=no newtab=no now=no
+  local target="" msg="" tmo=300000 ws="" label="" aname="" may_resume=yes exact=no newtab=no rpane="" now=no
   target="${1:-}"; shift || true
   msg="${1:-}";    shift || true
   [ -n "$target" ] || die_usage "tell needs a target — a 36-character session UUID, or a pane id like w8:p3"
@@ -978,7 +1013,8 @@ cmd_tell() {
       --no-resume)  may_resume=no; shift;;
       --exact)      exact=yes; shift;;
       --new-tab)    newtab=yes; shift;;
-      --now)        now=yes; shift;;         # into a WORKING session at once: Ctrl+Enter, no wait for idle
+      --pane)       rpane="$2"; shift 2;;   # resume INTO this pane: a stopped session whose tab is still open
+      --now)        now=yes; shift;;         # Ctrl+Enter, not Enter: a WORKING session takes it at once instead of queueing it
       *) die "tell: unknown option $1";;
     esac
   done
@@ -1030,6 +1066,7 @@ cmd_tell() {
     [ -n "$label" ] && ra+=(--label "$label")
     [ -n "$aname" ] && ra+=(--agent-name "$aname")
     [ "$newtab" = yes ] && ra+=(--new-tab)
+    [ -n "$rpane" ] && ra+=(--pane "$rpane")
     # cmd_resume runs in a subshell here, so its own `exit 1` lands on the || rather than
     # taking this process with it. Its diagnostics go to stderr and are left to pass through.
     local rout; rout=$(cmd_resume "${ra[@]}") || die "tell: the resume failed — nothing was sent"
@@ -1046,7 +1083,7 @@ cmd_tell() {
   # message and restore it as a stale draft, with old messages and "[Pasted text #N]" placeholders
   # that later sends then glue onto. The
   # lock is flock on a per-pane file (fd 9, so any exit releases it); python takes it because macOS
-  # ships no flock binary. A send queued behind another simply waits its turn, then for idle. A FIXED
+  # ships no flock binary. A send queued behind another simply waits its turn. A FIXED
   # path, never $TMPDIR: cron has no TMPDIR, so a scheduled send would lock in /tmp while a
   # session's lock under /var/folders, and neither would see the other.
   local lockdir="$HOME/.claude/state/herdr_tell_locks"; mkdir -p "$lockdir"
@@ -1060,28 +1097,26 @@ while True:
         if time.time() > end: sys.exit(1)
         time.sleep(0.2)' "$tmo" || die "tell: another send to $pane kept its box for ${tmo}ms — nothing was sent"
 
-  # The readiness gate. blocked is the one that has to be named rather than waited out: the
-  # session is stopped on a question it needs answered, and a message sent into that queues
-  # behind the question instead of being read. Queued is not delivered.
-  local st rc
-  if [ "$now" = yes ]; then
-    # --now goes in without waiting for the turn to end: Ctrl+Enter makes Claude Code take a
-    # typed message at once, moving a running foreground command to the background (it keeps
-    # running and reports back) instead of stopping it the way Escape does. Still refused while
-    # blocked, for the same reason as below.
-    local i; for i in 1 2 3 4 5; do st=$(agent_status_of "$pane"); [ -n "$st" ] && break; sleep 1; done
-    case "$st" in idle|done|working) rc=0;; *) rc=1;; esac
-  else
+  # The readiness gate, read BEFORE anything is pasted and never waited out. A WORKING target is
+  # sent to like an idle one: plain Enter puts the message in Claude Code's own queue, and the
+  # running turn reads it at its next step. blocked is refused: the session is stopped on a
+  # question, and typed keys can answer it (a digit picks an option). A session this call just
+  # RESUMED is waited on until idle instead, since keys sent before its input box exists are lost.
+  local st rc=0
+  if [ "$resumed" = yes ]; then
     st=$(wait_ready "$pane" "$tmo"); rc=$?
+  else
+    local i; for i in 1 2 3 4 5; do st=$(agent_status_of "$pane"); [ -n "$st" ] && break; sleep 1; done
+    case "$st" in idle|done|working) ;; *) rc=1;; esac
   fi
   case "$st" in
-    blocked) die "tell: $pane is BLOCKED on a prompt it needs answered — a message sent now would queue behind that question rather than be read. Answer it first; nothing was sent.";;
+    blocked) die "tell: $pane is BLOCKED on a prompt it needs answered — typed keys could answer that question, so nothing was sent. Answer it first.";;
   esac
-  [ "$rc" = 0 ] || die "tell: $pane settled at '${st:-<no live agent>}' rather than idle within ${tmo}ms — nothing was sent"
+  [ "$rc" = 0 ] || die "tell: $pane reads '${st:-<no live agent>}', not idle, done or working — nothing was sent"
 
-  # Same box check quit uses, and for the same reason: herdr agent prompt APPENDS to whatever
-  # is already in the input box and submits both together, so a send into a pane holding an
-  # unsent draft submits your draft for you.
+  # Same box check quit uses, and for the same reason: a paste APPENDS to whatever is already in
+  # the input box and Enter submits both together, so a send into a pane holding an unsent draft
+  # submits your draft for you.
   local draft drc
   draft=$(pane_draft "$pane"); drc=$?
   [ "$drc" = 2 ] && die "tell: cannot read the input box in $pane — refusing to send"
@@ -1091,7 +1126,9 @@ while True:
     # Captured with the FAITHFUL reader, not the detector: what goes back must keep the author's
     # indentation and blank lines. Falls back to the detector's text if that read fails, because
     # a flattened restore still beats losing the text.
-    local lifted; lifted=$(pane_draft_raw "$pane") || lifted="$draft"
+    local lifted lrc; lifted=$(pane_draft_raw "$pane"); lrc=$?
+    [ "$lrc" = 3 ] && die "tell: $pane holds unsent text taller than its input box, so only part of it is on screen and it cannot be lifted out whole — nothing was sent and the box is untouched."
+    [ "$lrc" = 0 ] || lifted="$draft"
     [ -n "$lifted" ] || lifted="$draft"
     echo "tell: $pane holds unsent text — lifting it out, sending, then putting it back. Its text:" >&2
     printf '%s\n' "$lifted" >&2
@@ -1114,14 +1151,7 @@ while True:
   local tr; tr=$(transcript_path "$uuid" 2>/dev/null) || tr=""
   local before=0; [ -f "$tr" ] && before=$(wc -l < "$tr" | tr -d ' ')
 
-  if [ "$now" = yes ]; then
-    pane_restore_box "$pane" "$msg"                # typed line by line, shift+enter between: a literal newline would submit early
-    herdr pane send-keys "$pane" ctrl+enter >/dev/null 2>&1
-    # The lifted draft goes back only once the box has emptied, or it would join the message.
-    local w; for w in $(seq 1 25); do [ "$(pane_draft "$pane" 2>/dev/null)" = "" ] && break; sleep 0.2; done
-  else
-    herdr agent prompt "$pane" "$msg" --wait --until working --timeout 30000 >/dev/null 2>&1
-  fi
+  tell_type_and_submit "$pane" "$msg" "$([ "$now" = yes ] && echo ctrl+enter || echo enter)"
 
   # Put the lifted text back now rather than at exit: the box is free the moment the prompt is
   # submitted, and the verification below can take time you would spend looking at an input box
