@@ -18,7 +18,8 @@
 
 Kinds: mattermost_new <channel|@user> [<from user>] · github_comments <owner/repo> <issue[,issue...]> <own login>
        new_files <abs dir> <pattern[,pattern...]> · gmail_new <query> · outlook_new <address> [<words>]
-       imessage_new <thread|*> · router <gmail|outlook:<address>|imessage ...>   (ai_comms_manager_checks.py)
+       imessage_new <thread|*> · router <gmail|outlook:<address>|imessage ...> · session_reply <uuid>
+       usage_window <account> <warn%> <throttle%> <failover%> [pace pace]   (ai_comms_manager_checks.py)
        timer   (no arguments; fires on its own schedule)
 <name> is <sid8>-<description>; any unique suffix of it works.
 """
@@ -50,7 +51,9 @@ TELL = os.environ.get("WATCH_TELL", "herdr_session_manage.sh")
 # skip mode is never used for outside text, so bypassPermissions falls back to default.
 RESUME_MODE = os.environ.get("WATCH_RESUME_MODE", "auto")
 RESUME_MODE = "default" if RESUME_MODE == "bypassPermissions" else RESUME_MODE
-KINDS = ("mattermost_new", "github_comments", "new_files", "gmail_new", "outlook_new", "imessage_new", "router", "timer")
+KINDS = ("mattermost_new", "github_comments", "new_files", "gmail_new", "outlook_new", "imessage_new", "router",
+         "session_reply", "usage_window", "timer")
+UNSCREENED = ("session_reply", "usage_window")   # a reply one of your own sessions wrote, or this Mac's own usage figures
 
 CHECK_TIMEOUT = 180                      # the router reads mail and makes one model call within it
 TELL_TIMEOUT_MS = 240000
@@ -446,7 +449,7 @@ def cmd_test(a):
         if os.path.isdir(seen_dir(name)):
             shutil.copytree(seen_dir(name), tmp, dirs_exist_ok=True)
         p = subprocess.run(CHECKS_ARGV + [r["kind"], "--run"] + r["args"], capture_output=True, text=True,
-                           env=dict(os.environ, WATCH_SEEN=tmp), timeout=CHECK_TIMEOUT)
+                           env=dict(os.environ, WATCH_SEEN=tmp, WATCH_DRY="1"), timeout=CHECK_TIMEOUT)   # dry: no post
         print("exit %d (%s)" % (p.returncode, {0: "would fire", 1: "nothing new"}.get(p.returncode, "check error")))
         print((p.stdout + p.stderr).strip())
     finally:
@@ -582,7 +585,7 @@ def new_event(name, r, st, text):
 
 def screen_event(name, r, st, n):
     e = st["events"][n]
-    if not e.get("file"):
+    if not e.get("file") or r["kind"] in UNSCREENED:
         e["status"] = "ready"
         return
     verdict, why = screen(open(e["file"]).read())

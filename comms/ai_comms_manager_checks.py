@@ -13,6 +13,13 @@ The check kinds behind ai_comms_manager.py (comms/README.md). One file so the ru
                                              d<N> = discussion N: any new comment, read from its page
   new_files <abs dir> <pattern[,pattern...]>   a new file in that local folder (top level) whose name
                                              matches a shell pattern, e.g. a download or an export landing
+  session_reply <session uuid>               that session finishing a turn, followed to the newest member of its
+                                             lineage across /successor; the event text is the start of its final
+                                             reply. Arm it --every 1m, one-shot
+  usage_window <account> <warn%> <throttle%> <failover%> [pace pace]   that Claude account's 5-hour window falling
+                                             to each % left, and its weekly window's pace (used% / elapsed%, default
+                                             1.25 1.5) staying past each ratio for 3 hours, once per window: posts the
+                                             user itself; fires to the owner at throttle and failover. Arm it --every 10m --repeat
   gmail_new <gmail search query>             a new Gmail message matching the query (gws from ../google/, read-only)
   outlook_new <address> [<words>]            a new Outlook inbox message (Microsoft Graph, read-only); with words, only
                                              those whose sender or subject contains all of them
@@ -28,9 +35,10 @@ The check kinds behind ai_comms_manager.py (comms/README.md). One file so the ru
 --run        needs $WATCH_SEEN (a folder the runner owns). Exit 0 = fired, the event text on stdout;
              1 = nothing new; any other exit = the check itself failed, reason on stderr.
 The first --run on an empty $WATCH_SEEN records what is already there and fires on nothing.
-Event text is OUTSIDE text: the runner screens it and hands it to a session as a file, never inline.
+Event text is OUTSIDE text: the runner screens it and hands it to a session as a file, never inline. Two kinds
+skip the screening: session_reply (a reply one of your own sessions wrote) and usage_window (this Mac's own figures).
 """
-import fnmatch, json, os, re, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
+import fnmatch, glob, json, os, re, shlex, shutil, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))   # after the standard library: ~/bin cannot shadow it
 KEEP_DAYS = 30                       # seen keys older than this are dropped; sources are queried for less
@@ -189,6 +197,228 @@ def new_files(args, mode, seen_dir):
     if len(new) > MAX_ITEMS:
         lines += ["(%d more not shown)" % (len(new) - MAX_ITEMS)]
     print("\n".join(lines))
+    return 0
+
+
+# ------------------------------------------------------------------ session_reply
+STATE = os.path.expanduser(os.environ.get("CLAUDE_STATE_DIR", "~/.claude/state"))
+LATEST = "claude_session_lineage_latest.py"          # optional (claude-code/bin): without it a session is its own lineage
+REPLY_CHARS = 600
+TAIL_BYTES = 4 << 20                  # a turn's end is near the end of the transcript; never read a 100 MB file whole
+
+
+def projects_dirs():
+    """Every Claude Code projects folder: one per account in accounts.json, else ~/.claude/projects."""
+    if os.environ.get("WATCH_PROJECTS"):                 # testing: a fake projects folder
+        return [os.path.expanduser(os.environ["WATCH_PROJECTS"])]
+    try:
+        accts = json.load(open(os.path.expanduser("~/.config/knowledge-worker-stack/accounts.json")))
+        dirs = [os.path.expanduser(v) for v in accts.values() if isinstance(v, str)]
+    except (OSError, ValueError, AttributeError):
+        dirs = []
+    return [os.path.join(d, "projects") for d in dirs or [os.path.expanduser("~/.claude")]]
+
+
+def lineage_members(uuid):
+    """The newest member of uuid's lineage, then uuid itself: a successor just born may have no transcript yet."""
+    helper = shutil.which(LATEST) or os.path.join(os.path.dirname(os.path.realpath(__file__)), LATEST)
+    try:
+        p = subprocess.run([sys.executable, "-I", helper, uuid], capture_output=True, text=True, timeout=20)
+        top = p.stdout.split("\t")[0].strip() if p.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        top = ""
+    return [top, uuid] if top and top != uuid else [uuid]
+
+
+def finished_turns(path):
+    """[(end timestamp, final reply text)] for each turn that ended in the transcript's last TAIL_BYTES."""
+    size = os.path.getsize(path)
+    with open(path, "rb") as fh:
+        fh.seek(max(0, size - TAIL_BYTES))
+        lines = fh.read().decode("utf-8", "replace").splitlines()
+    if size > TAIL_BYTES:
+        lines = lines[1:]                                  # cut mid-record
+    turns, reply, stop_only = [], [], False             # stop_only: the last turn came from a stop_hook_summary alone
+    for ln in lines:
+        try:
+            r = json.loads(ln)
+        except ValueError:
+            continue
+        if r.get("type") in ("user", "assistant"):
+            stop_only = False
+        if r.get("type") == "user":
+            reply = []                                     # a prompt or a tool result: the reply so far was not final
+        elif r.get("type") == "assistant":
+            for b in (r.get("message") or {}).get("content") or []:
+                if isinstance(b, dict) and b.get("type") == "text" and b.get("text", "").strip():
+                    reply.append(b["text"].strip())
+        elif r.get("type") == "system" and r.get("subtype") == "turn_duration":
+            if stop_only:                                  # same turn: keep turn_duration's timestamp as the seen key
+                turns[-1] = (r.get("timestamp", ""), turns[-1][1])
+            else:
+                turns.append((r.get("timestamp", ""), "\n\n".join(reply)))
+            reply, stop_only = [], False
+        # Claude Code sometimes stops writing turn_duration for the rest of a session while every turn still
+        # ends in a stop_hook_summary; a blocked stop is not an end.
+        elif (r.get("type") == "system" and r.get("subtype") == "stop_hook_summary"
+              and not r.get("preventedContinuation") and not r.get("isSidechain")):
+            turns.append((r.get("timestamp", ""), "\n\n".join(reply)))
+            reply, stop_only = [], True
+    return turns
+
+
+def session_reply(args, mode, seen_dir):
+    if len(args) != 1 or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", args[0]):
+        raise ValueError("session_reply takes the target session's full uuid")
+    for target in lineage_members(args[0]):          # follows the target through its /successor handovers
+        paths = [p for d in projects_dirs() for p in glob.glob(os.path.join(d, "*", target + ".jsonl"))]
+        if paths:
+            break
+    else:
+        raise ValueError("no transcript for session " + args[0])
+    turns = finished_turns(max(paths, key=os.path.getmtime))
+    if mode == "validate":
+        print("session_reply: %s, %d finished turn(s) so far (they will not fire)" % (target[:8], len(turns)))
+        return 0
+    seen, existed = load_seen(seen_dir)
+    new = [t for t in turns if t[0] not in seen]       # keys are per turn: a switch to the successor fires its latest once
+    now = time.time()
+    seen.update({t[0]: now for t in turns})
+    save_seen(seen_dir, seen)
+    if not existed or not new:
+        return 1
+    end, text = new[-1]
+    try:
+        t = json.load(open(os.path.join(STATE, "state_claude_session_titles.json"))).get(target) or {}
+    except (OSError, ValueError, AttributeError):
+        t = {}
+    print('Session "%s" (%s) finished a turn at %s. Its final reply%s:\n\n%s' % (
+        t.get("last_written") or t.get("cached_ai") or "?", target[:8], end,
+        ", first %d characters" % REPLY_CHARS if len(text) > REPLY_CHARS else "", text[:REPLY_CHARS] or "(no text)"))
+    return 0
+
+
+# ------------------------------------------------------------------ usage_window
+# The 5-hour and weekly figures exist only in Claude Code's status-line payload; claude-code/statusline.py saves
+# them per account to state_usage_window_<account>.json. The post to the user goes out from here, not through a
+# session: at the moment it matters the sessions are the thing running out. Only throttle and failover wake the owner.
+USAGE_DIR = os.path.expanduser(os.environ.get("WATCH_USAGE_DIR", STATE))
+USAGE_STALE = 1800                    # a file this old means no session is burning the window: nothing to warn about
+USAGE_SUSTAIN = 3 * 3600              # weekly pace must stay over a ratio this long: one heavy afternoon reads hot at any pace
+BRIDGE = "claude_chief_of_staff_phone_bridge.py"
+
+
+def usage_post(text):
+    """True when Mattermost has it or has queued it; False when the phone bridge held it (the user at this Mac),
+    failed, or is not installed: then the check fires to the owner instead."""
+    if os.environ.get("WATCH_POST"):                     # testing: stands in for the bridge
+        argv = shlex.split(os.environ["WATCH_POST"])
+    else:
+        bridge = shutil.which(BRIDGE) or os.path.join(os.path.dirname(os.path.realpath(__file__)), BRIDGE)
+        if not os.path.isfile(bridge):
+            return False
+        argv = [sys.executable, "-I", bridge, "--post", "--topic", "usage | Claude usage limits"]
+    try:                                  # the threshold is already marked done: a failed post must fall to the owner
+        p = subprocess.run(argv, input=text, capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return p.returncode == 0 and not p.stdout.startswith("held")
+
+
+def usage_hm(secs):
+    secs = max(0, int(secs))
+    return "%dh %02dm" % (secs // 3600, secs % 3600 // 60) if secs >= 3600 else "%d min" % (secs // 60)
+
+
+def usage_when(t):
+    return time.strftime("%a %-I:%M %p", time.localtime(t))
+
+
+def usage_window(args, mode, seen_dir):
+    try:
+        acct, nums = args[0], [float(x) for x in args[1:]]
+        levels, paces = nums[:3], nums[3:] or [1.25, 1.5]
+        assert len(levels) == 3 and 100 > levels[0] > levels[1] > levels[2] >= 0 and re.fullmatch(r"[\w-]+", acct)
+        assert len(paces) == 2 and 1 < paces[0] < paces[1]
+    except (IndexError, ValueError, AssertionError):
+        raise ValueError("usage_window takes <account> <warn%> <throttle%> <failover%> left, falling, then optionally two "
+                         "weekly pace ratios, rising: e.g. default 30 15 5 [1.25 1.5]")
+    path = os.path.join(USAGE_DIR, "state_usage_window_%s.json" % acct)
+    if not os.path.exists(path):
+        raise RuntimeError("no %s yet: statusline.py writes it once a session on that account renders" % path)
+    u, now = json.load(open(path)), time.time()
+    left, reset = 100 - float(u["five_used"]), float(u["five_resets_at"])
+    wused, wreset = u.get("seven_used"), u.get("seven_resets_at")
+    ratio = None                                          # weekly pace, as statusline.py's ▲N.N×: used% / elapsed%
+    if wused is not None and wreset:
+        elapsed = 1 - (float(wreset) - now) / (7 * 86400)
+        if float(wused) >= 10 and 0.02 <= elapsed <= 1:   # statusline.py's guards: a trivial stake, or just after a reset
+            ratio = float(wused) / 100 / elapsed
+    if mode == "validate":
+        print("usage_window: %s 5-hour window %d%% left, resets %s; posts at %s%% left; weekly pace %s, posts at %s" % (
+            acct, left, time.strftime("%H:%M", time.localtime(reset)), "/".join("%g" % x for x in levels),
+            "%.2fx" % ratio if ratio else "not measured yet", "/".join("%gx" % x for x in paces)))
+        return 0
+    stf = os.path.join(seen_dir, "usage_window.json")
+    st = json.load(open(stf)) if os.path.exists(stf) else None
+    first, st = st is None, st or {"samples": [], "fired": {}}
+    if now - u["ts"] > USAGE_STALE:
+        return 1                                          # nobody rendering: nothing is burning
+    st["fired"] = {k: v for k, v in st["fired"].items() if float(k.lstrip("w")) > now - 8 * 86400}
+    lines, lvl, posts = [], None, []
+    if now < reset:                                       # the 5-hour window, by % left
+        win = str(int(round(reset / 600) * 600))          # resets_at, to 10 min: the same window across renders
+        st["samples"] = [x for x in st["samples"] if x[2] == win and now - x[0] < 7200] + [[u["ts"], 100 - left, win]]
+        done = st["fired"].setdefault(win, [l for l in levels if left <= l] if first else [])   # first look never fires
+        due = [l for l in levels if left <= l and l not in done]
+        if due:
+            posts.append(("five", win, due))
+            lvl = min(due)
+            old = [x for x in st["samples"] if 600 <= u["ts"] - x[0] <= 3600]
+            burn = (100 - left - old[0][1]) / ((u["ts"] - old[0][0]) / 3600) if old else 0
+            if burn > 0.5:
+                out = now + left / burn * 3600
+                pace = "At the current burn (~%d%%/h) it %s." % (burn, "lasts until the reset" if out >= reset else
+                                                                 "runs out about %s" % time.strftime("%H:%M", time.localtime(out)))
+            else:
+                pace = "No burn rate yet (under 10 min of readings)."
+            week = " Weekly: %d%% left." % (100 - float(wused)) if wused is not None else ""
+            lines.append("Claude %s 5-hour window: %d%% left, resets %s (in %s). %s%s" % (
+                acct, left, time.strftime("%H:%M", time.localtime(reset)), usage_hm(reset - now), pace, week))
+    if ratio:                                             # the weekly window, by pace
+        wwin = "w" + str(int(round(float(wreset) / 600) * 600))
+        done = st["fired"].setdefault(wwin, [p for p in paces if ratio >= p] if first else [])
+        hot = st.setdefault("hot", {}).setdefault(wwin, {})          # ratio -> when it went over, cleared on dropping under
+        for p in paces:
+            if ratio >= p: hot.setdefault(str(p), now)
+            else: hot.pop(str(p), None)
+        st["hot"] = {k: v for k, v in st["hot"].items() if k == wwin}
+        due = [p for p in paces if ratio >= p and p not in done and now - hot[str(p)] >= USAGE_SUSTAIN]
+        if due:
+            posts.append(("week", wwin, due))
+            spent = (7 * 86400 - (float(wreset) - now)) / 86400
+            lines.append("Claude %s weekly window running hot (%.1fx even pace for 3+ hours): %d%% left after %.1f of 7 days, "
+                         "on pace to run out %s, resets %s." % (acct, ratio, 100 - float(wused), spent,
+                                                                usage_when(now + (100 - float(wused)) / float(wused) * spent * 86400),
+                                                                usage_when(float(wreset))))
+    if not lines or os.environ.get("WATCH_DRY") != "1":
+        os.makedirs(seen_dir, exist_ok=True)
+        for _, k, due in posts:
+            st["fired"][k] += due
+        json.dump(st, open(stf, "w"))
+    if not lines:
+        return 1
+    text = "\n".join(lines)
+    if os.environ.get("WATCH_DRY") == "1":
+        print("dry run, nothing posted or saved. Would post: " + text)
+        return 0
+    posted = usage_post(text)
+    if posted and lvl in (None, levels[0]):
+        return 1                                          # warnings only, and the user has them: no session spends a token
+    what = {None: "WARNING", levels[0]: "WARNING", levels[1]: "THROTTLE", levels[2]: "FAILOVER"}[lvl]
+    print("%s: %s\n%s" % (what, text, "Posted to the user on Mattermost (topic usage)." if posted else
+                          "NOT posted to the user (they are at this Mac, or the phone bridge is not set up or failed): "
+                          "tell them in one line."))
     return 0
 
 
@@ -795,7 +1025,8 @@ def router(args, mode, seen_dir):
 
 
 KINDS = {"mattermost_new": mattermost, "github_comments": github, "new_files": new_files, "gmail_new": gmail,
-         "outlook_new": outlook, "imessage_new": imessage, "router": router}
+         "outlook_new": outlook, "imessage_new": imessage, "router": router, "session_reply": session_reply,
+         "usage_window": usage_window}
 
 
 def main():

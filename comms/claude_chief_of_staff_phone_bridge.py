@@ -23,7 +23,8 @@ goes into the outbox and is posted, oldest first and marked delayed with the tim
 soon as Mattermost answers again — unless the bot already posted the same text since, so nothing
 doubles. --post tries for a few seconds only, then queues.
 Messages that arrive while the chief is busy are batched into one delivery, and held (across restarts)
-until it is free. A stopped chief is resumed: unlike the hourly wake, a text is a request to talk to it.
+until it is free. Your attachments (an image with no text too) are downloaded into $TMPDIR and their saved
+paths added to what the chief is told. A stopped chief is resumed: unlike the hourly wake, a text is a request to talk to it.
 
 Topic threads (THREADS): each topic is one thread in the DM. The chief opens its final text with a tag
 line, `[topic: trip-dates | Trip dates]` (title only needed the first time); the bridge strips
@@ -46,12 +47,18 @@ Verbs:
                 **Trip dates:** the second option is in.
                 MSG
               --post --topic KEY (or "KEY | Title") posts into that topic's thread; same as a tag line.
+              --post --image shot.png [--image two.png ...] attaches images (up to 10), stdin as their
+              caption (may be empty); with --topic too. Same hold, retries, outbox and no-repeat rule.
               While you are active at this Mac it posts nothing, prints a line starting "held:" and
               exits 0, so the chief puts the message in its chat reply instead.
               A turn's final reply is not posted when it repeats, word for word, something the
               bot already posted since that turn began.
   --topics    list the topic threads: key, title, link
   --rename KEY 'Title'  retitle a topic: the topics file, and the thread's first post if the bot wrote it
+  --remove KEY [KEY ...]  delete each topic's thread and forget the topic. A thread the bot opened goes
+              whole, your replies too; under your own first post only the bot's posts go. The same from
+              the phone: a reply of just "rm" inside a thread removes that thread, and nothing from it
+              reaches the chief.
   --threads   show, or set with `on` / `off`, whether topic threads are used — one command, no restart
 
 Config: ~/.config/knowledge-worker-stack/mattermost.env (MM_URL, MM_TEAM, MM_USER, MM_BOT; comms/README.md); the
@@ -59,12 +66,13 @@ token from the agent vault entry "Mattermost bot".
 State: ~/.claude/state/state_claude_chief_of_staff_phone_bridge.json (last post seen, and how far into the
 chief's transcript replies were forwarded, so a restart never replays). Topics: ..._topics.json beside
 it (key -> root post and title; locked, since --post writes it too); _threads (on/off, else THREADS);
-_outbox.json (posts waiting for Mattermost to come back; locked).
+_outbox.json (posts waiting for Mattermost to come back; locked), _outbox_images/ (copies of their images).
 Log: ~/Library/Logs/knowledge-worker-stack/claude_chief_of_staff_phone_bridge.log (launchd sends stderr there; --post writes it too).
 """
 import fcntl
 import hashlib
 import json
+import mimetypes
 import os
 import re
 import shutil
@@ -97,7 +105,10 @@ TOPICS = os.path.join(STATE_DIR, "state_claude_chief_of_staff_phone_bridge_topic
 THREADS = True                    # default when --threads was never set; False posts everything top-level
 SWITCH = os.path.join(STATE_DIR, "state_claude_chief_of_staff_phone_bridge_threads")
 OUTBOX = os.path.join(STATE_DIR, "state_claude_chief_of_staff_phone_bridge_outbox.json")
+OUTBOX_IMAGES = os.path.join(STATE_DIR, "state_claude_chief_of_staff_phone_bridge_outbox_images")  # copies of queued images
+MAX_IMAGES = 10                   # Mattermost's limit of files on one post
 QUICK = (2, 5)                    # --post's retries before it queues: never hangs the chief's turn
+RM = re.compile(r"\A\s*rm\.?\s*\Z", re.I)  # the user's "remove this thread", posted inside it
 TAG = re.compile(r"\A\s*\[topic:\s*([A-Za-z0-9][\w.-]{0,40})\s*(?:\|\s*([^\]\n]{1,80}?))?\s*\][ \t]*(?:\n|\Z)")
 POLL = 5                          # seconds between Mattermost polls
 STILL_WORKING = 20 * 60           # tell the user once the chief has been at it this long
@@ -145,14 +156,51 @@ class MM:
         with urllib.request.urlopen(req, timeout=30) as r:
             return json.loads(r.read() or b"null")
 
-    def post(self, channel, text, root=""):
+    def download(self, file_id):
+        """The bytes of an uploaded file. Needs the bridge's User-Agent too: a bare urllib one can get 403."""
+        req = urllib.request.Request(BASE + f"/api/v4/files/{file_id}", headers={
+            "Authorization": "Bearer " + self._t, "User-Agent": "claude-chief-phone-bridge/1"})
+        with urllib.request.urlopen(req, timeout=120) as r:
+            return r.read()
+
+    def post(self, channel, text, root="", files=()):
         first = None
         for i in range(0, max(len(text), 1), 15000):  # Mattermost caps a post at 16,383 chars
             body = {"channel_id": channel, "message": text[i:i + 15000]}
             if root:
                 body["root_id"] = root                # a reply inside that thread
-            first = first or self.create(body)
+            if files and not first:
+                body["file_ids"] = list(files)        # uploaded images ride on the first piece
+            pid = self.create(body)                 # every piece posts
+            first = first or pid
         return first
+
+    def upload(self, channel, path):
+        """POST one image to /files for `channel`; its file id. Retried like a post (no look-before-retry:
+        a doubled upload is only an unattached file). A 4xx (too big, refused type) raises at once."""
+        name = os.path.basename(path).replace('"', "'")
+        b = uuid.uuid4().hex
+        data = (f'--{b}\r\nContent-Disposition: form-data; name="channel_id"\r\n\r\n{channel}\r\n'
+                f'--{b}\r\nContent-Disposition: form-data; name="files"; filename="{name}"\r\n'
+                f'Content-Type: {mimetypes.guess_type(name)[0] or "application/octet-stream"}\r\n\r\n').encode() \
+            + open(path, "rb").read() + f"\r\n--{b}--\r\n".encode()
+        for wait in tuple(self.retry) + (None,):
+            try:
+                req = urllib.request.Request(BASE + "/api/v4/files", data=data, method="POST", headers={
+                    "Authorization": "Bearer " + self._t, "Content-Type": f"multipart/form-data; boundary={b}",
+                    "User-Agent": "claude-chief-phone-bridge/1"})
+                with urllib.request.urlopen(req, timeout=120) as r:
+                    return json.loads(r.read())["file_infos"][0]["id"]
+            except urllib.error.HTTPError as e:
+                if e.code < 500:
+                    raise
+                err = e
+            except (OSError, ValueError) as e:
+                err = e
+            if wait is None:
+                raise Unreachable(repr(err))
+            log(f"upload failed ({err!r}); retrying in {wait} s")
+            time.sleep(wait)
 
     def create(self, body):
         """POST one post, retried through a network failure or a 5xx. Before each retry it looks for the
@@ -184,7 +232,8 @@ class MM:
             self._me = self._me or self.api("GET", "/users/me")["id"]
             r = self.api("GET", f"/channels/{body['channel_id']}/posts?since={t0}")
             return next((i for i, p in r["posts"].items() if p["user_id"] == self._me and p["message"] == body["message"]
-                         and (p.get("root_id") or "") == body.get("root_id", "")), None)
+                         and (p.get("root_id") or "") == body.get("root_id", "")
+                         and len(p.get("file_ids") or []) == len(body.get("file_ids", []))), None)
         except Exception:
             return None
 
@@ -467,18 +516,41 @@ def forget_topic(key, path=None):
         os.replace(f.name, path)
 
 
-def deliver(mm, dm, text, ask_root=None, path=None):
-    """Post the chief's text. ask_root: where the user asked — the thread's root, "" for top level, None for
-    a forward or push. With THREADS off only the tag line is taken off: everything posts top-level."""
+def remove_thread(mm, bot_id, root, path=None):
+    """Delete the thread whose root post is `root`, and forget every topic filed under it. A bot-written
+    root is deleted, and Mattermost deletes a thread's replies with its root, the user's included; under
+    the user's own root the bot can delete only its own posts. (topic keys forgotten, posts deleted)."""
+    posts = mm.api("GET", f"/posts/{root}/thread")["posts"]
+    mine = [root] if posts[root]["user_id"] == bot_id else [i for i, p in posts.items() if p["user_id"] == bot_id]
+    for i in mine:
+        mm.api("DELETE", f"/posts/{i}")
+    keys = [k for k, v in topics(path).items() if v["root"] == root]
+    for k in keys:
+        forget_topic(k, path)
+    return keys, len(posts) if mine == [root] else len(mine)
+
+
+def rm_roots(posts, uid):
+    """The threads the user asked to remove: those holding a post they typed that is just "rm". A top-level
+    "rm" has no thread, so it goes to the chief like any text."""
+    return {p["root_id"] for p in posts if typed_by(p, uid) and p.get("root_id") and RM.match(p.get("message", ""))}
+
+
+def deliver(mm, dm, text, ask_root=None, path=None, images=()):
+    """Post the chief's text, with `images` attached under it as their caption. ask_root: where the user
+    asked — the thread's root, "" for top level, None for a forward or push. With THREADS off only the
+    tag line is taken off: everything posts top-level."""
     key, title, body = split_tag(text)
+    ids = [mm.upload(dm, i) for i in images]         # first: a caption never goes out without its images
+    put = lambda root="": mm.post(dm, body, root=root, files=ids) if ids else mm.post(dm, body, root=root)
     if not threads():
-        return mm.post(dm, body)
+        return put()
     try:
         if not key:
-            return mm.post(dm, body, root=ask_root or "")
-        root, title, opened = topic_root(mm, dm, key, readable_title(key, title, body), ask_root, path)
+            return put(ask_root or "")
+        root, title, opened = topic_root(mm, dm, key, readable_title(key, title, body or "Images"), ask_root, path)
         try:
-            pid = mm.post(dm, body, root=root)
+            pid = put(root)
         except urllib.error.HTTPError as e:
             # The thread's first post was deleted: Mattermost answers 400 "Invalid RootId" for good.
             # Reopen the topic under its title instead of going top-level forever.
@@ -487,12 +559,12 @@ def deliver(mm, dm, text, ask_root=None, path=None):
             log(f"topic {key}: its thread's first post is gone; opening the topic again")
             forget_topic(key, path)                  # `title` is already the stored one
             root, title, opened = topic_root(mm, dm, key, title, ask_root if ask_root != root else None, path)
-            pid = mm.post(dm, body, root=root)
+            pid = put(root)
     except Unreachable:
         raise                                        # Mattermost is down: top-level would fail the same way
     except Exception as e:                           # any threading failure: top-level, exactly as before
         log(f"thread post failed, posted top-level instead: {e!r}")
-        return mm.post(dm, body)
+        return put()
     if ask_root is not None and root != ask_root and not opened:
         try:
             mm.post(dm, f"**{title}:** answered in its thread: {link(pid)}", root=ask_root)
@@ -516,14 +588,21 @@ def locked_json(path, change):
         return out
 
 
-def send(mm, dm, text, ask_root=None):
-    """deliver(), or the outbox when Mattermost can't be reached through every retry. True if posted."""
+def send(mm, dm, text, ask_root=None, images=()):
+    """deliver(), or the outbox when Mattermost can't be reached through every retry. True if posted.
+    Queued images are copied beside the outbox, since a screenshot in a temp folder may be gone by then."""
     text = strip_no_phone(text) if NOPHONE in text else text   # a --post that carries the marker: never show it
     try:
-        deliver(mm, dm, text, ask_root)
+        deliver(mm, dm, text, ask_root, images=images)
         return True
     except Unreachable as e:
-        locked_json(OUTBOX, lambda q: q.append({"text": text, "ask_root": ask_root, "at": int(time.time() * 1000)}))
+        kept = []
+        for i in images:
+            os.makedirs(OUTBOX_IMAGES, exist_ok=True)
+            kept.append(os.path.join(OUTBOX_IMAGES, f"{uuid.uuid4().hex[:8]}-{os.path.basename(i)}"))
+            shutil.copyfile(i, kept[-1])
+        locked_json(OUTBOX, lambda q: q.append({"text": text, "ask_root": ask_root, "at": int(time.time() * 1000),
+                                                **({"images": kept} if kept else {})}))
         log(f"outbox: queued {len(text)} chars, Mattermost unreachable ({e})")
         return False
 
@@ -546,15 +625,19 @@ def flush(mm, dm, bot_id):
     mm.retry = ()
     try:
         for item in q:
+            imgs = [i for i in item.get("images", []) if os.path.exists(i)]
+            text = item["text"] + ("\n\n_(an image queued with this is gone)_" if len(imgs) < len(item.get("images", [])) else "")
             if already_pushed(item["text"], bot_posts_since(mm, dm, bot_id, item["at"] - 2000)):
                 log("outbox: already posted since, dropped")
             else:
                 try:
-                    deliver(mm, dm, delayed(item["text"], item["at"]), item.get("ask_root"))
+                    deliver(mm, dm, delayed(text, item["at"]), item.get("ask_root"), images=imgs)
                 except Unreachable:
                     return                           # still down: the rest wait, in order
-                log(f"outbox: delivered {len(item['text'])} chars, delayed")
+                log(f"outbox: delivered {len(item['text'])} chars{f' and {len(imgs)} image' + 's' * (len(imgs) != 1) if imgs else ''}, delayed")
             locked_json(OUTBOX, lambda cur: cur.remove(item) if item in cur else None)
+            for i in imgs:
+                os.remove(i)
     finally:
         mm.retry = old
 
@@ -633,17 +716,47 @@ def save(state):
     os.replace(f.name, STATE)
 
 
-def batch(posts, uid, bot_id):
+def typed_by(p, uid):
+    """A post the user typed: their user id, and not one a webhook, bot or plugin made under their name
+    (those carry one of AUTOMATED in their props)."""
+    return p.get("user_id") == uid and not any(k in (p.get("props") or {}) for k in AUTOMATED)
+
+
+def save_files(mm, post, sid8):
+    """The user's attachments on `post`, downloaded into the temp folder; one line naming the saved paths, so
+    the chief can open them. A file that won't download is named with the reason instead."""
+    names = {f["id"]: f.get("name", "") for f in (post.get("metadata") or {}).get("files", [])}
+    out = []
+    for fid in post["file_ids"]:
+        name = re.sub(r"[^\w.-]+", "_", os.path.basename(names.get(fid) or fid)) or fid
+        path = os.path.join(os.environ.get("TMPDIR") or "/tmp",
+                            f"claude-{datetime.now():%Y%m%d}-{sid8}-phone-{post['id'][:8]}-{name}")
+        try:
+            data = mm.download(fid)
+            with open(path, "wb") as f:
+                f.write(data)
+            out.append(path)
+        except Exception as e:
+            log(f"download of {fid} failed: {e!r}")
+            out.append(f"{name} (could not be downloaded: {e!r})")
+    return f"[The user attached {len(out)} file{'s' * (len(out) != 1)}, saved at: {', '.join(out)}]"
+
+
+def batch(posts, uid, bot_id, files=None):
     """([(root, text)], newest): the user's new posts, oldest first, one message per thread they were
-    written in (all as one top-level message with THREADS off); everything else is dropped. A post a webhook,
-    bot or plugin made under the user's name carries one of AUTOMATED in its props: it is not the user typing."""
-    mine = sorted((p for p in posts if p.get("user_id") == uid and not p.get("type")
-                   and not any(k in (p.get("props") or {}) for k in AUTOMATED)
-                   and p.get("message", "").strip()), key=lambda p: p["create_at"])
+    written in (all as one top-level message with THREADS off); everything else is dropped, posts a webhook,
+    bot or plugin made under the user's name included. A post with attachments, image-only ones included,
+    carries the line files(post) returns: where they were saved."""
+    mine = sorted((p for p in posts if typed_by(p, uid) and not p.get("type")
+                   and (p.get("message", "").strip() or p.get("file_ids"))), key=lambda p: p["create_at"])
     groups = {}
     on = threads()
     for p in mine:
-        groups.setdefault((p.get("root_id") or "") if on else "", []).append(p["message"].strip())
+        text = p.get("message", "").strip()
+        if p.get("file_ids"):
+            note = files(p) if files else f"[The user attached {len(p['file_ids'])} file(s); not downloaded]"
+            text = f"{text}\n{note}" if text else note
+        groups.setdefault((p.get("root_id") or "") if on else "", []).append(text)
     return [(r, "\n\n".join(m)) for r, m in groups.items()], max((p["create_at"] for p in posts), default=0)
 
 
@@ -753,7 +866,16 @@ def run():
             log(f"poll failed: {e}")
             time.sleep(30)
             continue
-        groups, newest = batch(posts, uid, bot_id)
+        gone = rm_roots(posts, uid)
+        for root in gone:
+            try:
+                keys, n = remove_thread(mm, bot_id, root)
+                log(f"rm: removed thread {root} ({n} posts, topics {keys or 'none'})")
+            except Exception as e:
+                log(f"rm: couldn't remove thread {root}: {e!r}")
+        kept = [p for p in posts if (p.get("root_id") or p["id"]) not in gone]   # nothing from a removed thread reaches the chief
+        groups, _ = batch(kept, uid, bot_id, files=lambda p: save_files(mm, p, ((chief() or ["bridge00"])[0])[:8]))
+        newest = max((p["create_at"] for p in posts), default=0)
         if newest:
             since = state["since"] = newest
             save(state)
@@ -822,26 +944,37 @@ def check():
     print("posted a test line to the DM")
 
 
-def push(text, conn=connect, logpath=LOG, topic=None):
-    """--post: one message to the user's DM as the bot, unless they are at this Mac. Never tells or waits on the chief."""
+def push(text, conn=connect, logpath=LOG, topic=None, images=()):
+    """--post: one message to the user's DM as the bot, images attached under the text, unless they are at
+    this Mac. Never tells or waits on the chief."""
     text = text.strip()
-    if not text:
+    if not text and not images:
         sys.exit("--post: nothing on stdin; nothing posted")
+    missing = [i for i in images if not os.path.isfile(i)]
+    if missing:
+        sys.exit(f"--post: no such image {missing[0]}; nothing posted")
+    if len(images) > MAX_IMAGES:
+        sys.exit(f"--post: {len(images)} images; Mattermost takes {MAX_IMAGES} per post, so split them; nothing posted")
+    what = f"{len(text)} chars" + (f" and {len(images)} image{'s' * (len(images) != 1)}" if images else "")
     mm, _, uid, dm = conn()
     if at_mac(user_last(mm, dm, uid)):
         with open(logpath, "a") as f:
-            f.write(f"{datetime.now():%F %T} push: held {len(text)} chars (the user is active at this Mac)\n")
-        print("held: the user is active at this Mac, nothing posted. Put this in your chat reply instead.")
+            f.write(f"{datetime.now():%F %T} push: held {what} (the user is active at this Mac)\n")
+        print("held: the user is active at this Mac, nothing posted. Put this in your chat reply instead"
+              + (", with the image paths." if images else "."))
         return
     mm.retry = QUICK
-    posted = send(mm, dm, f"[topic: {topic}]\n{text}" if topic else text)
+    try:
+        posted = send(mm, dm, f"[topic: {topic}]\n{text}" if topic else text, images=images)
+    except urllib.error.HTTPError as e:              # a refused upload (too big, a type the server bars)
+        sys.exit(f"--post: Mattermost refused it ({e.code} {e.reason}); nothing posted")
     with open(logpath, "a") as f:
-        f.write(f"{datetime.now():%F %T} push: {len(text)} chars{' to ' + topic if topic else ''}"
+        f.write(f"{datetime.now():%F %T} push: {what}{' to ' + topic if topic else ''}"
                 f"{'' if posted else ' QUEUED (Mattermost unreachable)'}\n")
     if not posted:
         print("queued: Mattermost is unreachable; it posts, marked delayed, as soon as it is back.")
         return
-    print(f"posted {len(text)} chars to the user's DM")
+    print(f"posted {what} to the user's DM")
 
 
 if __name__ == "__main__":
@@ -850,10 +983,14 @@ if __name__ == "__main__":
         sys.exit(setup())
     if a == ["--check"]:
         sys.exit(check())
-    if a == ["--post"]:
-        sys.exit(push(sys.stdin.read()))
-    if len(a) == 3 and a[:2] == ["--post", "--topic"]:
-        sys.exit(push(sys.stdin.read(), topic=a[2]))
+    if a[:1] == ["--post"]:
+        opts, rest = {"--topic": [], "--image": []}, a[1:]
+        while len(rest) >= 2 and rest[0] in opts:
+            opts[rest[0]].append(rest[1])
+            rest = rest[2:]
+        if rest or len(opts["--topic"]) > 1:
+            sys.exit(__doc__)
+        sys.exit(push(sys.stdin.read(), topic=(opts["--topic"] or [None])[0], images=opts["--image"]))
     if a == ["--threads"]:
         sys.exit(print("on" if threads() else "off"))
     if len(a) == 2 and a[0] == "--threads" and a[1] in ("on", "off"):
@@ -867,6 +1004,15 @@ if __name__ == "__main__":
         root = rename(mm, bot_id, key, title)
         sys.exit(print(f"{key} is now \"{title}\"" + ("; its thread's first post edited to match" if root
                        else "; its thread starts with your own text, left as is")))
+    if len(a) >= 2 and a[0] == "--remove":
+        keys, t = [k.lower() for k in a[1:]], topics()
+        if [k for k in keys if k not in t]:
+            sys.exit(f"--remove: no topic {', '.join(k for k in keys if k not in t)}; --topics lists them")
+        mm, bot_id, _, _ = connect()
+        for k in keys:
+            _, n = remove_thread(mm, bot_id, t[k]["root"])
+            print(f"{k} (\"{t[k]['title']}\"): thread removed, {n} posts deleted")
+        sys.exit(0)
     if a == ["--topics"]:
         for k, v in topics().items():
             print(f"{k}\t{v['title']}\t{link(v['root'])}")

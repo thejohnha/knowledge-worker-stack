@@ -10,7 +10,8 @@
 #   1. exactly one chief is live in herdr (never resumes a stopped chief: the user may have closed it on purpose)
 #   2. its agent_status is idle or done
 #   3. its transcript's last record is at least QUIET_MIN old, so a conversation is never interrupted
-#   4. its input box holds no draft — enforced by `tell` itself
+#   4. no usage throttle is in force for this hour (below)
+#   5. its input box holds no draft — enforced by `tell` itself
 #
 # Log: ~/Library/Logs/knowledge-worker-stack/claude_chief_of_staff_wake.log — one line per run that got past gate 1.
 # --find: print the live chief's uuid (or "none") and exit, for scripts that hand the chief work.
@@ -19,6 +20,7 @@
 
 PATH="$HOME/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 QUIET_MIN=${CHIEF_QUIET_MIN:-25}
+FIRST_HOUR=9   # the first wake hour in the launchd plist (comms/README.md); a usage throttle counts from it
 LOG=$HOME/Library/Logs/knowledge-worker-stack/claude_chief_of_staff_wake.log
 mkdir -p "${LOG%/*}"
 
@@ -37,6 +39,12 @@ case "$state" in
 esac
 case "$status" in idle|done) ;; *) say "skip $uuid: status $status"; exit 0 ;; esac
 [ "$quiet" -ge "$QUIET_MIN" ] 2>/dev/null || { say "skip $uuid: quiet ${quiet}m < ${QUIET_MIN}m"; exit 0; }
+# Usage throttle, to stretch Claude usage to a reset: the file holds "<until YYYY-MM-DD HH:MM> <every N hours>";
+# before that time only every Nth wake, counted from FIRST_HOUR, runs. Remove the file to end it early.
+THR=$HOME/.claude/state/state_claude_chief_of_staff_wake_throttle
+if [ -s "$THR" ]; then read -r tu_d tu_t tn < "$THR"
+  if [[ "$(date '+%F %H:%M')" < "$tu_d $tu_t" ]] && (( (10#$(date +%H) - FIRST_HOUR) % ${tn:-3} != 0 )); then say "skip $uuid: throttled to every ${tn}h until $tu_d $tu_t"; exit 0; fi
+fi
 
 # The scan rides in the message, so the pass starts from a fresh list rather than from memory.
 scan=$(/usr/bin/python3 -I "$HOME/bin/claude_chief_of_staff_owed_scan.py" 2>&1); rc=$?

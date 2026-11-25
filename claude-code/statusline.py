@@ -63,6 +63,26 @@ def account_name():
             return name
     return 'default'
 
+def save_usage(pf, ps):
+    # The usage figures exist only in this payload, so this is the one place a job outside any session
+    # (the comms manager's usage_window check) can read them from. One file per account (account_name());
+    # a FIXED path under ~/.claude/state, because launchd and cron run with TMPDIR unset. Rewritten only when
+    # a figure moves or the file is a minute old, so many sessions rendering at once cost a stat each, not a write.
+    if pf.get('used_percentage') is None:
+        return
+    path = os.path.join(HOME, '.claude', 'state', f'state_usage_window_{account_name()}.json')
+    new = {'five_used': pf.get('used_percentage'), 'five_resets_at': pf.get('resets_at'),
+           'seven_used': ps.get('used_percentage'), 'seven_resets_at': ps.get('resets_at')}
+    try:
+        old = safe_read_json(path) or {}
+        if {k: old.get(k) for k in new} == new and time.time() - os.path.getmtime(path) < 60:
+            return
+    except Exception:
+        pass
+    try: os.makedirs(os.path.dirname(path), exist_ok=True)
+    except Exception: return
+    safe_write_json(path, dict(new, ts=time.time()))
+
 def fmt_tokens(n):
     # Compact context sizes: 9.5k / 110k / 1.2M — precision fades as the number grows, and a bare
     # .0 is dropped so round window sizes read as advertised (1M, not 1.0M).
@@ -276,6 +296,7 @@ try:
         try: wk_remain = int(ps['resets_at']) - time.time()
         except Exception: wk_remain = None
         seven = _bar_window(ps['used_percentage'], reset_from_epoch(ps.get('resets_at')), weekly=True, remain_secs=wk_remain)
+    save_usage(pf, ps)
 
     # Build output
     lines_str = f"+{lines_added}/-{lines_removed} lines" if (lines_added or lines_removed) else ""
