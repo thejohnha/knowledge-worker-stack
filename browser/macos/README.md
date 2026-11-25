@@ -88,7 +88,7 @@ plutil -lint ~/Library/LaunchAgents/local.agent-browser.chromium-port.plist    #
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.agent-browser.chromium-port.plist
 launchctl kickstart gui/$(id -u)/local.agent-browser.chromium-port            # run it now, without logging out
 ```
-- If macOS reopens Chromium at login ("Reopen windows when logging back in") before this runs, Chromium is up without the port and the script leaves it alone; quit Chromium and run step 4.
+- If macOS reopens Chromium at login ("Reopen windows when logging back in") before this runs, the script quits that Chromium and starts it again with the port and `--restore-last-session`, so the same windows come back. A Chromium running without the port for over 5 minutes is left alone: quit it and run step 4.
 
 ## 6. Test it
 ```bash
