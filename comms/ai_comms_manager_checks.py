@@ -18,8 +18,10 @@ The check kinds behind ai_comms_manager.py (comms/README.md). One file so the ru
                                              reply. Arm it --every 1m, one-shot
   usage_window <account> <warn%> <throttle%> <failover%> [pace pace]   that Claude account's 5-hour window falling
                                              to each % left, and its weekly window's pace (used% / elapsed%, default
-                                             1.25 1.5) staying past each ratio for 3 hours, once per window: posts the
-                                             user itself; fires to the owner at throttle and failover. Arm it --every 10m --repeat
+                                             1.25 1.5) staying past each ratio for 3 hours, and its 5-hour pace running
+                                             it dry 30+ min before the reset, once per window: posts the user itself;
+                                             fires to the owner at throttle, failover and a 5-hour pace of 2x. Arm it
+                                             --every 10m --repeat
   gmail_new <gmail search query>             a new Gmail message matching the query (gws from ../google/, read-only)
   outlook_new <address> [<words>]            a new Outlook inbox message (Microsoft Graph, read-only); with words, only
                                              those whose sender or subject contains all of them
@@ -334,6 +336,10 @@ def usage_when(t):
     return time.strftime("%a %-I:%M %p", time.localtime(t))
 
 
+def usage_clock(t):
+    return time.strftime("%-I:%M %p", time.localtime(t))
+
+
 def usage_window(args, mode, seen_dir):
     try:
         acct, nums = args[0], [float(x) for x in args[1:]]
@@ -364,8 +370,8 @@ def usage_window(args, mode, seen_dir):
     first, st = st is None, st or {"samples": [], "fired": {}}
     if now - u["ts"] > USAGE_STALE:
         return 1                                          # nobody rendering: nothing is burning
-    st["fired"] = {k: v for k, v in st["fired"].items() if float(k.lstrip("w")) > now - 8 * 86400}
-    lines, lvl, posts = [], None, []
+    st["fired"] = {k: v for k, v in st["fired"].items() if float(k.lstrip("wp")) > now - 8 * 86400}
+    lines, lvl, posts, pwake = [], None, [], False
     if now < reset:                                       # the 5-hour window, by % left
         win = str(int(round(reset / 600) * 600))          # resets_at, to 10 min: the same window across renders
         st["samples"] = [x for x in st["samples"] if x[2] == win and now - x[0] < 7200] + [[u["ts"], 100 - left, win]]
@@ -385,6 +391,20 @@ def usage_window(args, mode, seen_dir):
             week = " Weekly: %d%% left." % (100 - float(wused)) if wused is not None else ""
             lines.append("Claude %s 5-hour window: %d%% left, resets %s (in %s). %s%s" % (
                 acct, left, time.strftime("%H:%M", time.localtime(reset)), usage_hm(reset - now), pace, week))
+        # 5-hour pace: the steeper of the burn since the window opened and the burn of the last 30-60 min, once per
+        # window, when it runs the window dry over 30 min before the reset; at 2x even pace (40%/h) the owner throttles
+        used5, gone, pk = 100 - left, now - (reset - 5 * 3600), "p" + win
+        if used5 >= 20 and gone >= 1800:
+            rec = [x for x in st["samples"] if 1800 <= u["ts"] - x[0] <= 3600]
+            burn5 = max([used5 / (gone / 3600)] + ([(used5 - rec[0][1]) / ((u["ts"] - rec[0][0]) / 3600)] if rec else []))
+            out5 = now + left / burn5 * 3600 if burn5 > 0 else reset
+            pdone = st["fired"].setdefault(pk, [1] if first and out5 < reset - 1800 else [])
+            if out5 < reset - 1800 and not pdone:
+                posts.append(("five", pk, [1]))
+                pwake = burn5 >= 40
+                lines.append("Claude %s 5-hour window running hot: %d%% used in %s (%.1fx even pace), on pace to run out at %s, "
+                             "resets %s.%s" % (acct, used5, usage_hm(gone), burn5 / 20, usage_clock(out5), usage_clock(reset),
+                                               " Throttling early." if pwake else ""))
     if ratio:                                             # the weekly window, by pace
         wwin = "w" + str(int(round(float(wreset) / 600) * 600))
         done = st["fired"].setdefault(wwin, [p for p in paces if ratio >= p] if first else [])
@@ -413,9 +433,9 @@ def usage_window(args, mode, seen_dir):
         print("dry run, nothing posted or saved. Would post: " + text)
         return 0
     posted = usage_post(text)
-    if posted and lvl in (None, levels[0]):
+    if posted and lvl in (None, levels[0]) and not pwake:
         return 1                                          # warnings only, and the user has them: no session spends a token
-    what = {None: "WARNING", levels[0]: "WARNING", levels[1]: "THROTTLE", levels[2]: "FAILOVER"}[lvl]
+    what = "FAILOVER" if lvl == levels[2] else "THROTTLE" if lvl == levels[1] or pwake else "WARNING"
     print("%s: %s\n%s" % (what, text, "Posted to the user on Mattermost (topic usage)." if posted else
                           "NOT posted to the user (they are at this Mac, or the phone bridge is not set up or failed): "
                           "tell them in one line."))
