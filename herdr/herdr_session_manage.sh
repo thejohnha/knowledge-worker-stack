@@ -77,8 +77,8 @@
 set -uo pipefail
 
 usage() { sed -n '2,/^# Why each verb/p' "$0" | sed -e '$d' -e '$d' -e 's/^# \{0,1\}//' >&2; }  # synopsis + examples, delimited by ADDRESS not a line number so a concurrent synopsis insert cannot truncate them; the rationale below is for readers, not the usage line
-die() { echo "herdr_session_manage: $*" >&2; exit 1; }
-die_usage() { echo "herdr_session_manage: $*" >&2; echo >&2; usage; echo >&2; echo "herdr_session_manage: $*" >&2; exit 2; }   # the reason again LAST: a caller reading `| tail -1` saw only the usage's final example line
+die() { _DIE_MSG="$*"; echo "herdr_session_manage: $*" >&2; exit 1; }
+die_usage() { _DIE_MSG="$*"; echo "herdr_session_manage: $*" >&2; echo >&2; usage; echo >&2; echo "herdr_session_manage: $*" >&2; exit 2; }   # the reason again LAST, so a caller reading `| tail -1` sees it rather than the usage's last example
 need() { command -v "$1" >/dev/null 2>&1 || die "missing dependency: $1"; }
 # The flag fails SOFT in claude: a typo prints one stderr line and the session runs at the default.
 # bypassPermissions is refused: this script runs on an agent's word, and skip mode is the user's call alone.
@@ -223,6 +223,18 @@ pane_restore_box() {
 # The lifted draft lives in globals so the EXIT trap can still see it: an EXIT trap fires after
 # the function returns, by which point its locals are gone.
 _TELL_DRAFT_PANE=""; _TELL_DRAFT_TEXT=""
+# The one machine-readable answer to "can the caller safely send this again?": a failing tell ends its
+# stderr with `tell-outcome: not-sent: <the reason>` ONLY while nothing has reached the target's box (the
+# reason rides along so a caller showing `tail -1` still shows why). Callers must key on that last line's
+# prefix, never on words elsewhere in the output: tell echoes a lifted draft verbatim, and a draft that
+# says "nothing was sent" would otherwise make a failed-after-sending tell look safe to resend.
+_TELL_OUTCOME=""
+tell_on_exit() {
+  local rc=$?
+  tell_restore_draft
+  [ "$rc" != 0 ] && [ "$_TELL_OUTCOME" = not-sent ] && echo "tell-outcome: not-sent: $(printf '%s' "${_DIE_MSG:-see above}" | tr '\n' ' ')" >&2   # one line, always last
+  return "$rc"
+}
 tell_restore_draft() {
   [ -n "$_TELL_DRAFT_PANE" ] || return 0
   local pane="$_TELL_DRAFT_PANE"; _TELL_DRAFT_PANE=""    # cleared first, so a second call is a no-op
@@ -968,12 +980,14 @@ tell_type_and_submit() {
   # ONE bracketed paste, as herdr agent prompt sends it. Text typed through send-text is split by
   # Claude Code's paste detection: a long line arrives as its first part wrapped as a paste and the
   # rest typed after, which reads as an altered message. Inside a paste a newline does not submit.
+  _TELL_OUTCOME=maybe-sent                          # from here the text may be in the box
   herdr pane send-text "$pane" $'\e[200~'"$msg"$'\e[201~' >/dev/null 2>&1
   for i in 1 2 3; do st=$(agent_status_of "$pane"); [ -n "$st" ] && break; sleep 0.5; done
   case "$st" in
     idle|done|working) ;;
     *)
       local cleared=no; pane_clear_box "$pane" && cleared=yes
+      [ "$cleared" = yes ] && _TELL_OUTCOME=not-sent  # Enter never pressed and the box is empty again
       if [ -n "$_TELL_DRAFT_PANE" ]; then          # never type a lifted draft back into a question or a shell
         _TELL_DRAFT_PANE=""
         echo "tell: your unsent text was NOT put back in $pane. It was:" >&2
@@ -988,6 +1002,7 @@ tell_type_and_submit() {
 
 cmd_tell() {
   local target="" msg="" tmo=300000 ws="" label="" aname="" may_resume=yes exact=no newtab=no rpane="" now=no
+  _TELL_OUTCOME=not-sent; trap tell_on_exit EXIT
   target="${1:-}"; shift || true
   msg="${1:-}";    shift || true
   [ -n "$target" ] || die_usage "tell needs a target — a 36-character session UUID, or a pane id like w8:p3"
@@ -1048,6 +1063,17 @@ cmd_tell() {
       lat_num=${latest%% *}; lat_title=${latest#* }
       echo "tell: $uuid is a stopped, older member of its series — delivering to '$lat_title' ($lat_num), $lat_uuid, instead (--exact overrides)" >&2
       uuid="$lat_uuid"; pane=$(pane_of_uuid "$uuid")
+    fi
+  fi
+  # --exact keeps the address, but it never RESURRECTS a superseded member: that puts two members of one
+  # lineage live, and with two live chiefs of staff the phone bridge cannot tell which one to text.
+  # A LIVE target is still told as addressed; only waking an old one is refused.
+  if [ -z "$pane" ] && [ "$exact" = yes ]; then
+    local sup; sup=$(series_latest "$uuid")
+    if [ -n "$sup" ]; then
+      local sup_uuid sup_num sup_title sup_pane
+      read -r sup_uuid sup_num sup_title <<<"$sup"; sup_pane=$(pane_of_uuid "$sup_uuid")
+      die "tell: $uuid is stopped and SUPERSEDED — the newest of its lineage is '$sup_title' ($sup_num), $sup_uuid, $([ -n "$sup_pane" ] && echo "live in $sup_pane" || echo "stopped"). --exact will not wake an old member; nothing was sent. Tell $sup_uuid, or drop --exact to be redirected."
     fi
   fi
 
@@ -1133,7 +1159,7 @@ while True:
     echo "tell: $pane holds unsent text — lifting it out, sending, then putting it back. Its text:" >&2
     printf '%s\n' "$lifted" >&2
     _TELL_DRAFT_PANE="$pane"; _TELL_DRAFT_TEXT="$lifted"
-    trap tell_restore_draft EXIT INT TERM          # armed FIRST: any exit from here puts it back
+    trap tell_on_exit EXIT; trap tell_restore_draft INT TERM   # armed FIRST: any exit from here puts it back
     if ! pane_clear_box "$pane"; then
       _TELL_DRAFT_PANE=""                          # a restore now would append to text still there
       die "tell: could not empty the input box in $pane — nothing was sent, and the box may hold only part of your text. The whole of it is printed above."

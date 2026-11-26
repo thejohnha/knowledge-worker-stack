@@ -258,12 +258,32 @@ def connect():
 # --- the chief ---------------------------------------------------------------------------------
 def chief():
     """(uuid, pane, status) of the live chief; (uuid, None, 'stopped') for a stopped one; else None."""
-    c = finder.find()
+    try:
+        c = finder.find()
+    except Exception:                                # a state file mid-rewrite: no chief, so the text is held
+        return None
+    STALE[:] = []
+    if c[0] == "many" and len(c) > 2 and c[2]:       # two live members: the newest holds the work
+        STALE[:] = c[3]
+        c = c[2]
     if c[0] == "live":
         return c[1], c[2], c[4]
     if c[0] == "stopped":
         return c[1], None, "stopped"               # tell resolves any member to the lineage's latest
     return None
+
+
+STALE = []          # panes of live chiefs chief() passed over as older; exchange() warns the user once per set
+WARNED = set()
+REFUSED = {}        # thread root -> tell's refusal reason, for the one hold notice
+# exchange()'s hold verdicts -> what the user hears, once per held text. Every one keeps the text in STATE
+# and retries it each pass, so no text is dropped while no chief can take it.
+HOLD_WHY = {"busy": "the chief is blocked on a question", "nochief": "no chief of staff session found"}
+HOLD_NOTICE = {
+    "busy": "The chief is busy right now. Your text is held here and goes in as soon as it is free.",
+    "nochief": "No chief of staff session is reachable right now. Your text is held here and goes in as soon as one is.",
+    "refused": "The chief couldn't take your text yet ({}). It is held here and retried every pass.",
+}
 
 
 def status_of(uuid):
@@ -766,9 +786,13 @@ def exchange(mm, dm, bot_id, text, root=""):
     say = lambda t: send(mm, dm, t, ask_root=root)  # bridge notices go where the user asked
     c = chief()
     if not c:
-        say("No chief of staff session found (none open, or more than one live). Nothing was sent.")
-        return
+        return "nochief"                             # tell_all() holds the text, logs it and retries every pass
     uuid = c[0]
+    if STALE and tuple(STALE) not in WARNED:
+        WARNED.add(tuple(STALE))
+        log(f"more than one live chief: using {uuid[:8]} in {c[1]}; stale: {', '.join(STALE)}")
+        say(f"Two chief of staff sessions are live. Your text goes to the newest, in {c[1]}; "
+            f"the older one in {', '.join(STALE)} should be quit.")
     try:
         note = topic_note(mm, root) if threads() else ""
     except Exception:                                # no note: the chief still gets the text
@@ -779,10 +803,19 @@ def exchange(mm, dm, bot_id, text, root=""):
     rec = next((w.split("=", 1)[1] for w in out.split() if w.startswith("record=")), None)
     uuid = next((w.split("=", 1)[1] for w in out.split() if w.startswith("uuid=")), uuid)
     log(f"tell {uuid[:8]} rc={p.returncode} record={rec}")
-    if p.returncode == 1 and ("rather than idle" in out or "is BLOCKED" in out):
-        return "busy"                                # refused before sending: run() holds the text and retries
-    if p.returncode == 1:
-        say("Couldn't reach the chief — nothing was sent. Reason: " + out.splitlines()[-1][:300])
+    # Held ONLY on tell's own last line: its output also carries any lifted draft verbatim, so a phrase
+    # found anywhere else could make a failed-after-sending tell look safe to send again.
+    lines = out.splitlines()
+    if p.returncode == 1 and lines and lines[-1].startswith("tell-outcome: not-sent:"):
+        why = lines[-1][len("tell-outcome: not-sent:"):].strip() or "no reason given"
+        if "is BLOCKED" in why:
+            return "busy"                            # tell_all() holds the text and retries
+        REFUSED[root] = why[:300]
+        return "refused"
+    last = lines[-1][:300] if lines else "(no output)"
+    if p.returncode == 1:                            # it may have arrived (e.g. altered): never resend blind
+        log(f"tell failed after sending: {last}")
+        say("Couldn't reach the chief cleanly. Check the chief on the Mac before resending. Reason: " + last)
         return
     if p.returncode == 3 or not rec:
         say("Sent, but delivery wasn't confirmed. Check the chief on the Mac before resending.")
@@ -829,12 +862,12 @@ def tell_all(mm, dm, bot_id, state, groups):
     still = []
     for root, text in todo.items():
         try:
-            if exchange(mm, dm, bot_id, text, root) == "busy":
+            why = exchange(mm, dm, bot_id, text, root)
+            if why in HOLD_NOTICE:
                 still.append([root, text])
-                log(f"held {len(text)} chars: the chief stayed busy; retrying next pass")
-                if root not in held:
-                    send(mm, dm, "The chief is busy right now. Your text is held here and goes in as soon "
-                                 "as it is free.", ask_root=root)
+                if root not in held:                 # logged once per hold, not every 5-second pass
+                    log(f"held {len(text)} chars ({HOLD_WHY.get(why) or REFUSED.get(root, why)}); retrying every pass")
+                    send(mm, dm, HOLD_NOTICE[why].format(REFUSED.get(root, "")), ask_root=root)
         except Exception as e:                       # one bad exchange must not kill the daemon
             log(f"exchange failed: {e!r}")
             try:

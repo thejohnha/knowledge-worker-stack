@@ -6,6 +6,8 @@ bridge, the owed scan and the Stop hook all ask this one file, so they always ag
                                                 stopped <uuid>     (no live chief; the newest one)
                                                 none               (no chief at all)
                                                 many <n>           (more than one live: fix by hand)
+As a module, find() returns ("many", n, newest, stale) for more than one live: newest is the live tuple of the
+lineage's newest member, or None when that cannot be decided; stale lists the other live chiefs' panes.
 
 The chief is a session that is not closed and either has a prime directive naming chief-of-staff.md
 (when the prime directive tool is installed) or the title "Chief of staff", optionally numbered and after
@@ -165,14 +167,32 @@ def quiet_minutes(path):
     return int((datetime.now(timezone.utc) - datetime.fromisoformat(ts.replace("Z", "+00:00"))).total_seconds() // 60)
 
 
+def newest_live(live):
+    """(live tuple of the lineage's newest member, the other live panes), or (None, panes) when the lineage
+    helper cannot say or names a member that is not live: guessing could hand a text to the old one."""
+    panes = sorted(a.get("pane_id") or "?" for a in live)
+    try:
+        r = subprocess.run(["claude_session_lineage_latest.py", live[0]["agent_session"]["value"]],
+                           capture_output=True, text=True, timeout=20)
+        newest = r.stdout.split("\t")[0].strip() if r.returncode == 0 else ""
+    except (OSError, subprocess.TimeoutExpired):
+        newest = ""
+    pick = [a for a in live if a["agent_session"]["value"] == newest]
+    if not pick:
+        return (None, panes)
+    a = pick[0]
+    return (("live", newest, a.get("pane_id"), a.get("tab_id"), a.get("agent_status")),
+            [p for p in panes if p != a.get("pane_id")])
+
+
 def find():
-    """("live", uuid, pane, tab, status) · ("stopped", uuid) · ("none",) · ("many", n)."""
+    """("live", uuid, pane, tab, status) · ("stopped", uuid) · ("none",) · ("many", n, newest, stale)."""
     lin, tit = jload(LINEAGE), jload(TITLES)
     ags = agents() or []
     live = [a for a in ags if a.get("agent") in (None, "claude") and (a.get("agent_session") or {}).get("value")
             and is_chief(a["agent_session"]["value"], a.get("terminal_title_stripped") or a.get("name") or "", lin, tit)]
     if len(live) > 1:
-        return ("many", len(live))
+        return ("many", len(live)) + newest_live(live)
     if live:
         a = live[0]
         return ("live", a["agent_session"]["value"], a.get("pane_id"), a.get("tab_id"), a.get("agent_status"))
@@ -191,7 +211,7 @@ def main():
     if r[0] == "live":
         print("live", r[1], r[2], r[3], r[4], quiet_minutes(transcript(r[1])))
     else:
-        print(*r)
+        print(*r[:2])                                # "many <n>" stays two words for the shell callers
 
 
 if __name__ == "__main__":
