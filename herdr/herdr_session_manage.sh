@@ -264,6 +264,22 @@ e=p[0]
 print(e.get("cmdline") or e.get("argv0") or e.get("name") or "")' 2>/dev/null
 }
 
+# The ONLY state in which typing a command line is safe: the foreground is one process, and it
+# is a shell. pane_shell_cmd reads just the FIRST foreground process, and mid-turn that is
+# claude's caffeinate, so an "is it claude*" test waves a WORKING session through and types the
+# cr line into its input box, where it sits as an unsent draft. A shell's foreground is [bash];
+# an idle claude [claude]; a working claude [caffeinate, claude]. Prints the foreground names,
+# comma-joined, for the caller's message.
+pane_at_bare_shell() {
+  herdr pane process-info --pane "$1" 2>/dev/null | python3 -c '
+import json,os,sys
+try: p=json.load(sys.stdin)["result"]["process_info"]["foreground_processes"]
+except Exception: print("unreadable"); sys.exit(1)
+n=[os.path.basename(e.get("argv0") or e.get("name") or (e.get("cmdline") or "?").split()[0]).lstrip("-") for e in p]
+print(",".join(n) or "none")
+sys.exit(0 if len(n)==1 and n[0] in ("bash","zsh","sh") else 1)' 2>/dev/null
+}
+
 # Reads the second |-separated field of the status line, which is where the knowledge-worker-stack status line
 # (claude-code/) prints "<model> <effort>". With another status line this reads nothing useful and
 # warn_model says the model went unverified, which is a warning, never a failure.
@@ -809,15 +825,11 @@ cmd_resume() {
   if [ -z "$pane" ] && [ -z "$ws" ]; then
     local home_pane; home_pane=$(recorded_pane "$uuid")
     if [ -n "$home_pane" ]; then
-      local home_cmd; home_cmd=$(pane_shell_cmd "$home_pane")
-      case "$home_cmd" in
-        # Still there and sitting at a shell: come back in the very pane it died in, scrollback
-        # and all. Not a tab WE created, so it is not ours to close if the resume fails.
-        ""|claude*) : ;;
-        *) if [ "$reuse" = yes ] && [ -z "$(pane_session_uuid "$home_pane")" ]; then
-             pane="$home_pane"; echo "resume: reusing $pane, where this session last ran (--new-tab overrides)" >&2
-           fi;;
-      esac
+      # Still there and sitting at a bare shell: come back in the very pane it died in, scrollback
+      # and all. Not a tab WE created, so it is not ours to close if the resume fails.
+      if [ "$reuse" = yes ] && pane_at_bare_shell "$home_pane" >/dev/null && [ -z "$(pane_session_uuid "$home_pane")" ]; then
+        pane="$home_pane"; echo "resume: reusing $pane, where this session last ran (--new-tab overrides)" >&2
+      fi
       [ -z "$pane" ] && ws="${home_pane%%:*}"      # pane gone or busy: at least its workspace
     fi
     # A workspace that has since been closed would send the tab back to herdr's default, which is
@@ -858,9 +870,15 @@ cmd_resume() {
     read -r pane tab < <(new_tab_pane "${tab_name:-resume ${uuid:0:8}}" "$ws")
     [ -n "$pane" ] && [ -n "$tab" ] || die "tab create returned no pane/tab ($pane/$tab)"
     wait_for_shell "$pane" || { herdr tab close "$tab" >/dev/null 2>&1; die "pane $pane never reached a shell"; }
-  else
-    local cmd; cmd=$(pane_shell_cmd "$pane")
-    case "$cmd" in claude*) die "pane $pane is already running claude — quit it first";; esac
+  fi
+  # Checked for EVERY path, the last moment before typing: whatever is not a bare shell would
+  # swallow the line — a Claude input box keeps it as an unsent draft. Re-read for ~3 s first: a
+  # brand-new tab can still be running its ~/.bashrc, whose children are briefly the foreground.
+  local fg i bare=no; for i in 1 2 3 4 5 6; do fg=$(pane_at_bare_shell "$pane") && { bare=yes; break; }; sleep 0.5; done
+  if [ "$bare" = no ]; then
+    case ",$fg," in *,claude,*) fg="already running claude ($fg)";; *) fg="not at a bare shell prompt (foreground: $fg)";; esac
+    [ -n "$tab" ] && herdr tab close "$tab" >/dev/null 2>&1   # only a tab THIS call created
+    die "resume: pane $pane is $fg — nothing was typed; quit it first"
   fi
 
   # cr, not agent start -- --resume: cr is the only path that refuses a second live copy of
@@ -891,6 +909,17 @@ cmd_resume() {
   if [ "$good" != yes ]; then
     echo "resume did not take in $pane — the pane says:" >&2
     herdr pane read "$pane" --source visible --lines 12 --format text >&2
+    # The guard above makes this a race (claude started between the check and the typing), but if
+    # the line did land in an input box, take it back out rather than leave it to be sent later.
+    # Only when the box holds OUR line and nothing else: anything more is someone's draft. Compared
+    # with spaces and breaks removed, because a narrow box wraps the line and the reader strips each row.
+    local left; left=$(pane_draft_once "$pane" 2>/dev/null)
+    if [ -n "$left" ] && [ "$(tr -d ' \n' <<<"$left")" = "$(tr -d ' ' <<<"$crcmd")" ]; then
+      if pane_clear_box "$pane"; then echo "resume: the cr line sat unsent in $pane's input box — cleared it" >&2
+      else echo "resume: the cr line sits unsent in $pane's input box and would not clear — clear it by hand" >&2; fi
+    elif [ -n "$left" ]; then
+      echo "resume: $pane's input box holds text that is not just the cr line — left it alone: $left" >&2
+    fi
     # Close only a tab THIS call created; a caller-supplied --pane is not ours to close.
     [ -n "$tab" ] && herdr tab close "$tab" >/dev/null 2>&1
     exit 1

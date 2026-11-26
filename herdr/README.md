@@ -314,7 +314,8 @@ herdr_session_manage.sh tell <uuid> "the folder moved; re-read it before you act
 - A message one session sends another should open with `From session <sender's title>:`. The comms owed scan ([`../comms/`](../comms/)) uses that opening to tell a session's message from yours; `tell` itself does not add or check it.
 - `resume` and `tell` on an older, stopped member of a numbered series ("Notes 24" when "Notes 25" exists) go to the newest member instead; `--exact` overrides.
 - `tell --exact` never wakes a stopped member that has a newer one: it refuses, naming the newest. A failing `tell` whose text never reached the target ends with `tell-outcome: not-sent: <reason>`; only that last line makes a resend safe.
-- A resumed session goes back where it lived: its old pane if that is at a shell, else that pane's workspace, else a new workspace. Never into the caller's.
+- A resumed session goes back where it lived: its old pane if its foreground is a lone shell, else that pane's workspace, else a new workspace. Never into the caller's.
+- `resume` types its `cr` line only into a pane whose foreground is a lone shell; a Claude session there, idle or mid-turn, is refused and nothing is typed, since its input box would keep the line as a draft. A failed resume clears its own line from an input box that holds nothing else.
 - `--model` fails soft in Claude Code (an unknown name is accepted silently), so the herdr session manager reads it back off the status line and warns. That read expects the knowledge-worker-stack status line (`../claude-code/`); with another, it warns that the model went unverified.
 
 ### Exit a session from inside it
