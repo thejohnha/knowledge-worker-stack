@@ -80,12 +80,23 @@ if [[ "$1" == --watch ]]; then
     return 0
   }
 
+  # A session that ran out of usage sits on Claude Code's limit menu, which herdr reads as blocked, so it
+  # never goes idle and the restart that would move it to another account waits out its whole budget.
+  # Choosing "Stop and wait for limit to reset" (the menu's cancel) only ends the stalled turn.
+  limit_menu() {   # a menu check, not a draft check: the selected option line is never the dim suggestion
+    herdr pane read "$1" --source visible --lines 30 --format text 2>/dev/null |
+      grep -qE '❯ *([0-9]+\. *)?Stop and wait for limit to reset'
+  }
+
   say "watching $u in $pane — skip=$skip account=${acct:-(unchanged)} model=${model:-(default)} effort=${effort:-(default)}"
   idle=0; quit=no; armed=$(date +%s)
   for _ in $(seq 1 "${RESTART_POLLS:-120}"); do
     sleep "${RESTART_POLL:-5}"
     st=$(herdr agent list 2>/dev/null | jq -r --arg p "$pane" '.result.agents[]|select(.pane_id==$p)|.agent_status')
     [[ -z "$st" ]] && { say "no agent in $pane any more — nothing to quit"; quit=gone; break; }
+    if [[ "$st" == blocked ]] && limit_menu "$pane"; then
+      herdr pane send-keys "$pane" enter >/dev/null 2>&1; idle=0; say "dismissed the usage-limit menu (Stop and wait for limit to reset)"; continue
+    fi
     [[ "$st" == idle || "$st" == done ]] || { idle=0; continue; }
     (( ++idle < 2 )) && continue
     if out=$(herdr_session_manage.sh quit "$pane" 2>&1); then
@@ -139,11 +150,16 @@ if [[ "$1" == --watch ]]; then
       what=(); [[ "$skip" == yes ]] && what+=("in skip mode"); [[ -n "$acct" ]] && what+=("on the $acct account")
       msg="Restarted${what:+ ${what[*]}}. Continue where you left off; if you were waiting on the user, say so in one line."
       # env -u: this watcher inherited the restarted session's own id, and tell refuses to message itself.
-      if out=$(env -u CLAUDE_CODE_SESSION_ID herdr_session_manage.sh tell "$u" "$msg" --no-resume --exact --timeout 180000 2>&1); then
-        say "continue sent: $out"
-      else
-        say "continue NOT confirmed (rc=$?): $out"
-      fi
+      # A fresh pane reads 'unknown' for its first seconds and tell refuses it; retry only while tell's last
+      # line says nothing was sent, since any other failure may have delivered it.
+      tries=${RESTART_CONTINUE_TRIES:-20}
+      for try in $(seq 1 "$tries"); do
+        out=$(env -u CLAUDE_CODE_SESSION_ID herdr_session_manage.sh tell "$u" "$msg" --no-resume --exact --timeout 180000 2>&1); rc=$?
+        if [[ $rc == 0 ]]; then say "continue sent (try $try): $out"; break; fi
+        if [[ "$(tail -1 <<<"$out")" != "tell-outcome: not-sent:"* ]]; then say "continue NOT confirmed (rc=$rc): $out"; break; fi
+        [[ $try == "$tries" ]] && { say "continue never sent after $tries tries: $out"; break; }
+        sleep "${RESTART_CONTINUE_WAIT:-3}"
+      done
     fi
   else
     say "resume FAILED: $out"; say "paste in $pane: $fallback"; record resume-failed; exit 1

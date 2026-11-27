@@ -94,6 +94,7 @@ ai_comms_manager.py add router --owner "$CHIEF" --what "Asks no session owns, an
 ```
 - Sources: `gmail`, `outlook:<address>` (one per signed-in address), `imessage`. Name only those you set up.
 - **Dry run, the only mode built:** a message the model places with a watcher is only logged; that watcher still delivers it. The router's own message goes to the chief alone. Read `~/.claude/state/state_ai_comms_manager_router.jsonl` (one line per message: where it would go, ask, summary, obligation, why) to see whether its sorting matches yours.
+- Calendar candidates: a dated event (a day or date plus a game, match, party, tournament…) in an activity or friends' group text goes to the chief once per chat and date, with what your primary Google calendar already holds that day, read through gws, or "not checked" without it. Other group chatter is not sent. The iMessage export marks group chats; after updating, rerun `install.sh` so the export job picks up that column.
 - Per run it reads at most 8 emails in full and 10 text threads; the rest wait for the next run. The same sender and subject alert once in 3 days. Your own sent mail is skipped.
 - Cost: one Opus call per run that finds new mail, plus the injection checker on its message.
 - A model answer that is not the expected list fails the run: nothing is marked read, and the next run judges the same messages again.
