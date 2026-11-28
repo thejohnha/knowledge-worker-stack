@@ -209,7 +209,6 @@ mkdir -p ~/Library/Logs/knowledge-worker-stack
 plutil -lint local.knowledge-worker-stack.claude-chief-of-staff-phone-bridge.plist && launchctl bootstrap gui/$(id -u) local.knowledge-worker-stack.claude-chief-of-staff-phone-bridge.plist
 ```
 - DM the bot; the text reaches the chief marked as yours from the phone, and the chief's answer comes back. Only your own posts count; one a webhook, bot or plugin made under your name does not.
-- A text from the phone never lets the chief send, post, submit or pay in your name, and it tells sessions so when it relays your answer: any session can type the bridge's opening line into the chief, and any session that can read the vault can post to your phone as the bot.
 - For two hours after your last text, the chief's other finished turns are forwarded too. While you are at the Mac (input in the last 10 minutes), nothing goes to the phone.
 - Busy chief, no chief found, or a send refused before anything reached it: your texts are held, retried every pass, and go in together once it can take them; you hear once that they wait. Mattermost down: posts queue and go out marked delayed.
 - Two chiefs live (an old one woken by mistake): your text goes to the newest member of the lineage, and you are told once which older pane to quit.

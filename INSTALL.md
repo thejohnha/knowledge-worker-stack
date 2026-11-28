@@ -1,4 +1,4 @@
-# Setting up the Knowledge Worker Stack: instructions for the agent
+# Setting up Painkiller: instructions for the agent
 
 You are setting this up for the person you are talking to, on their own Mac. They steer; you do the work. They may not be an engineer: plain words, one question or one step per message, and wait for the answer before the next. The folder READMEs are the source of truth; `install.sh` does what they say and nothing more.
 
@@ -11,7 +11,7 @@ You are setting this up for the person you are talking to, on their own Mac. The
 - `uname -m` prints `arm64` (Apple silicon). On `x86_64`, say it is untested there and ask whether to go on.
 - The repo lives at `~/knowledge-worker-stack`; keep it there, since `--uninstall` and updates run from it. If `xcode-select -p` fails, there is no `git` yet (running it opens Apple's install dialog), so download without it:
 ```bash
-mkdir -p ~/knowledge-worker-stack && curl -fsSL https://github.com/thejohnha/knowledge-worker-stack/archive/HEAD.tar.gz | tar xz -C ~/knowledge-worker-stack --strip-components 1
+mkdir -p ~/knowledge-worker-stack && curl -fsSL https://github.com/thejohnha/painkiller/archive/HEAD.tar.gz | tar xz -C ~/knowledge-worker-stack --strip-components 1
 ```
 - `cd ~/knowledge-worker-stack`. Run `./install.sh --help` and read README.md once.
 
@@ -21,7 +21,7 @@ First show the "What you get" table in README.md, in your own plain words, with 
    - Recommended, simplest: **browser-macos**. The agent uses Chromium on this Mac with the logins the user makes there, in background windows that never take the user's focus. Trade-off: while it runs, any program on the Mac can use those logins (browser/macos/README.md, "Know the exposure").
    - **browser-orbstack**: a small Linux machine inside the Mac, so the agent's logins stay apart from the user's. More setup, about 8 GB of memory to spare, and OrbStack is free for personal use only (paid for business use).
    - Neither, for now.
-2. **Text the agents from a phone?** That adds **mattermost** (a chat server on this Mac) and, after the user makes an account, **phone-bridge**. Say plainly: as installed the phone cannot reach it, and nothing answers while the Mac sleeps. Opening it to the Wi-Fi is an extra, untested step, and then anyone on that network could read the traffic and pose as the user to the chief of staff, which acts on those texts. Recommend only an encrypted route such as Tailscale (also untested). A text from the phone never approves sending, posting, submitting or paying; only the user typing at the Mac does.
+2. **Text the agents from a phone?** That adds **mattermost** (a chat server on this Mac) and, after the user makes an account, **phone-bridge**. Say plainly: as installed the phone cannot reach it, and nothing answers while the Mac sleeps. Opening it to the Wi-Fi is an extra, untested step, and then anyone on that network could read the traffic and pose as the user to the chief of staff, which acts on those texts. Recommend only an encrypted route such as Tailscale (also untested).
 3. **Keep the Mac awake with the lid closed?** That adds **keep-awake**: `zz` blocks sleep, also with the lid closed, and `zzz` undoes it. The chief of staff, the comms manager and the phone bridge only work while the Mac is awake, so ask this whenever the user wants any of them working while they are away. Say plainly: a closed Mac that cannot sleep keeps running in a bag, where it can overheat and drain the battery, so `zzz` before packing it. Without a password each time needs a sudo rule the user pastes once (keep-awake/README.md step 2), which lets any program running as an admin user toggle sleep blocking, and nothing else.
 4. **Google (Gmail, Drive, Sheets, Docs, Calendar)?** That adds **google**: the agent searches and reads mail, writes drafts the user sends, and reads Drive files, Sheets, Docs and the calendar. It needs about 15 minutes of clicks in Google's Cloud Console (google/README.md). Ask whether it is a work (Google Workspace) account or a personal @gmail.com one. Personal: follow google/README.md "Known limits" (External audience, the user added as a test user, sign in again every 7 days).
 5. **Do you work with Excel files?** That adds **office**: tools that let the agent change a workbook without losing formulas, stored results, formats or pivot tables (office/README.md). Nothing to click.
@@ -70,7 +70,7 @@ Offer it once. claude-code/README.md piece 1 replaces the Keychain login with a 
 3. `./install.sh --only model-sync`: keeps the `/model` list current under the token (piece 7). Install it only with the token.
 
 ## 6. Last step, and the chief of staff
-- Before the user quits, put this line on their clipboard with `~/bin/agent_copy_to_clipboard`: `Continue the Knowledge Worker Stack setup: read ~/knowledge-worker-stack/INSTALL.md and pick up at section 6, second bullet.` The user then quits Claude Code, opens a new Terminal window, types `h` and presses Enter, starts `claude` in a herdr tab and pastes the line. That session has every new hook, skill and command.
+- Before the user quits, put this line on their clipboard with `~/bin/agent_copy_to_clipboard`: `Continue the Painkiller setup: read ~/knowledge-worker-stack/INSTALL.md and pick up at section 6, second bullet.` The user then quits Claude Code, opens a new Terminal window, types `h` and presses Enter, starts `claude` in a herdr tab and pastes the line. That session has every new hook, skill and command.
 - Ask the user to press ctrl+alt+g (it opens the grid in its own workspace), then alt+up and alt+down (they move between workspaces), and to tell you whether both worked. If not, the Option key setting from step 4 is off.
 - Ask whether they want the chief of staff (a session that hands every task reaching it, from the user or from their email and texts, to a session that does all the reversible work at once, so what waits for the user is only the step only they can take: a send, a payment, a signature, a decision). If yes, run these from a session inside herdr. `herdr_session_manage.sh` can start, message and close any session, so it is not pre-approved: Claude Code may ask the user to approve each command; say so first.
 ```bash

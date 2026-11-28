@@ -1,13 +1,24 @@
-# Knowledge Worker Stack
+# Painkiller
 
-Everything you need to run several Claude Code sessions on your Mac at once and let them do real work: drive a browser, use passwords without ever seeing them, hand long jobs on to fresh sessions, and wake up when a message they are waiting for arrives. The point of it all: a chief-of-staff session starts work on every task that reaches you, from you or from your email and texts, so when you open your laptop or phone, the work is done up to the step only you can take, and that step is waiting for you.
+**What if the work was already done by the time you picked up your phone?**
+
+Buying something online: make an account, invent a password, type your shipping address, your billing address, your card number. Ugh. Finding a meeting time: five emails. The renewal you forgot, the form due Friday, the letter you haven't opened.
+
+Painkiller takes that pain away. A chief of staff watches everything that reaches you (email, texts, your calendar) and starts the work the moment it lands. It fills in the forms, finds the time, drafts the reply. Want something? It finds it, fills in the checkout, and buys it when you say yes from your phone. When you look, only your part is left: a yes, a send, a signature.
+
+Ignore it and it doesn't give up. It asks again, smaller each time, until one word from you moves it forward.
+
+I run my life from my phone now. I barely open my laptop.
+
+## What it is
+Everything you need to run several Claude Code sessions on your Mac at once and let them do real work: drive a browser, use passwords without ever seeing them, hand long jobs on to fresh sessions, and wake up when a message they are waiting for arrives.
 
 For someone who works in Claude Code every day and wants it to do more on its own; no engineering needed. Not yet installed end to end on a fresh Mac (see [Status](#status)).
 
 ## Set it up
 Open Claude Code and say:
 
-> Download github.com/thejohnha/knowledge-worker-stack into ~/knowledge-worker-stack and follow INSTALL.md.
+> Download github.com/thejohnha/painkiller into ~/knowledge-worker-stack and follow INSTALL.md.
 
 It shows you what you can get (below), asks which parts you want, runs [`install.sh`](install.sh), and then walks you through the few clicks only you can do, one at a time.
 
@@ -33,7 +44,7 @@ Open Terminal, type `h`, press Enter. That is the whole start. [CHEATSHEET.md](C
 | **A browser of its own** | Claude uses a real browser, signed in to your sites, in background windows that never take over your screen. | [`browser/`](browser/) |
 | **Passwords it uses but never sees** | A separate password store holding only the logins you give Claude, and a pop-up for the ones only you know. | [`vault/`](vault/), [`secret-dialog/`](secret-dialog/) |
 | **Your Gmail, calendar and Google files** | Claude searches and reads your mail, Drive, Sheets, Docs and calendar. It writes drafts; you send them. | [`google/`](google/) |
-| **Text your chief of staff from your phone** | Optional, through [Mattermost on your own Mac](comms/mattermost/). A text from the phone never approves sending, posting or paying; only you, at the Mac, do. | [`comms/mattermost/`](comms/mattermost/) |
+| **Text your chief of staff from your phone** | Optional, through [Mattermost on your own Mac](comms/mattermost/). | [`comms/mattermost/`](comms/mattermost/) |
 | **Keeps working while you are away** | Type `zz` and the Mac stays awake, lid closed too; `zzz` lets it sleep again. Optional. | [`keep-awake/`](keep-awake/) |
 | **Excel files changed safely** | Claude changes a workbook without losing formulas, formats or pivot tables. Optional. | [`office/`](office/) |
 

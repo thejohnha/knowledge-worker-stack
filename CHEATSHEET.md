@@ -41,7 +41,7 @@ One screen with every session, running or put away. From a plain Terminal, type 
 Dots: yellow = working, green = waiting for you, red = asking you a question, P = parked.
 
 ## Chief of staff: ctrl+alt+c
-If you set one up: jumps to your chief of staff session (and wakes it if it was stopped). Ask it "what's waiting on me?" Type `priorities.py` in a tab to see its ranked list of what needs you; p on a row sets its rank, and the chief keeps yours. A text from your phone never approves sending, posting, submitting or paying; do that at the Mac. On the phone, reply just `rm` inside a thread to delete that thread.
+If you set one up: jumps to your chief of staff session (and wakes it if it was stopped). Ask it "what's waiting on me?" Type `priorities.py` in a tab to see its ranked list of what needs you; p on a row sets its rank, and the chief keeps yours. On the phone, reply just `rm` inside a thread to delete that thread.
 
 ## Typing in a session
 | Type | When |
